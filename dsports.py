@@ -9,7 +9,6 @@ def _():
     import marimo as mo # Relevante para usar .py como .ipynb
     import polars as pl
     from IPython.display import display
-    import subprocess
 
     return display, mo, pl
 
