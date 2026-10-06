@@ -1,3 +1,4 @@
 marimo
 polars
 ipython
+seaborn
