@@ -919,7 +919,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(expand_output=True)
 def _(
     df_DSPORTS,
     df_DSPORTS_2,
