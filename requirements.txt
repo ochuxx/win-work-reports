@@ -2,3 +2,5 @@ marimo
 polars
 ipython
 seaborn
+pydantic_ai
+plotly
