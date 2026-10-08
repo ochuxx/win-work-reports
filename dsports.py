@@ -87,7 +87,8 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(dt):
+    # Constantes -> únicos
     DEVICE_UNIQUE_COLS = [
       'Date',
       'SubscriberID',
@@ -96,7 +97,12 @@ def _():
       'DeviceType',
       'deviceDescription',
     ]
-    return (DEVICE_UNIQUE_COLS,)
+
+    # Constantes -> Cambios manuales
+    # Afecta también a la concurrencia de reproducción
+    DATE_REPORT_INI = dt.date(2026, 9, 1)
+    DATE_REPORT_END = dt.date(2026, 9, 30)
+    return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
 @app.cell
@@ -369,10 +375,18 @@ def _():
 
 
 @app.cell
-def _(SIGNALS, df_views, df_views_title, display, dt, pl):
+def _(
+    DATE_REPORT_END,
+    DATE_REPORT_INI,
+    SIGNALS,
+    df_views,
+    df_views_title,
+    display,
+    pl,
+):
     # Filtrar fechas para reporte
-    df_views_filt = df_views.filter(pl.col('Date').dt.date().is_between(dt.date(2026, 9, 26), dt.date(2026, 10, 6)))
-    df_views_title_filt = df_views_title.filter(pl.col('Date').dt.date().is_between(dt.date(2026, 9, 26), dt.date(2026, 10, 6)))
+    df_views_filt = df_views.filter(pl.col('Date').dt.date().is_between(DATE_REPORT_INI, DATE_REPORT_END))
+    df_views_title_filt = df_views_title.filter(pl.col('Date').dt.date().is_between(DATE_REPORT_INI, DATE_REPORT_END))
 
     # Filtrar solo señales para el dataset con títulos (después se reescalan con las views totales del día)
     df_views_title_filt = df_views_title_filt.filter(pl.col('Title').is_in(SIGNALS))
@@ -462,7 +476,7 @@ def _():
 
 
 @app.cell
-def _(WINDOW_MINUTES, df, dt, pl, plt):
+def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
     def _to_utc_datetime(df: pl.DataFrame, col: str) -> pl.DataFrame:
       dtype = df.schema.get(col)
       if dtype is None or not isinstance(dtype, pl.Datetime):
@@ -628,7 +642,7 @@ def _(WINDOW_MINUTES, df, dt, pl, plt):
       return fig, ax
 
     df_dates_filter = df.filter(
-      pl.col('Date').str.to_datetime(strict=False).dt.date().is_between(dt.date(2026, 9, 26), dt.date(2026, 10, 6))
+      pl.col('Date').str.to_datetime(strict=False).dt.date().is_between(DATE_REPORT_INI, DATE_REPORT_END)
     )
 
     general_streaming_plot = plot_concurrent_users_chart(
@@ -651,10 +665,7 @@ def _(mo):
 
 
 @app.cell
-def _(SIGNALS, df_dates_filter, dt, pl):
-    REPORT_START = dt.date(2026, 9, 26)
-    REPORT_END = dt.date(2026, 10, 4)
-
+def _(SIGNALS, df_dates_filter, pl):
     # Cantidad de registros por día y por señal, y su porcentaje relativo diario
     # (entre señales). Es la base del reescalado de la concurrencia.
     df_signals_day = (
@@ -864,7 +875,17 @@ def _(df_views_scaler, mo, pl):
 
 
     def kpi_card_senal(signal, total, fecha_min, fecha_max, color):
-        """Tarjeta estilo KPI con el total de vistas reescaladas de una señal."""
+        """Tarjeta estilo KPI con el total de vistas reescaladas de una señal.
+
+        Tolera señales sin filas en `df_kpi_por_senal` (fechas None): en ese caso
+        muestra un aviso en lugar de fallar al formatear la fecha.
+        """
+        if fecha_min is not None and fecha_max is not None:
+            rango_fechas = (
+                f'Vistas totales desde {fecha_min:%d/%m/%Y} hasta {fecha_max:%d/%m/%Y}'
+            )
+        else:
+            rango_fechas = 'Sin vistas en el periodo del reporte'
         return mo.Html(
             f"""
             <div style="
@@ -897,10 +918,10 @@ def _(df_views_scaler, mo, pl):
                     letter-spacing: 1px;
                     opacity: 0.7;
                 ">
-                    Total reproducciones
+                    Total views
                 </div>
                 <div style="font-size: 0.7rem; opacity: 0.7;">
-                    Vistas totales desde {fecha_min:%d/%m/%Y} hasta {fecha_max:%d/%m/%Y}
+                    {rango_fechas}
                 </div>
             </div>
             """
