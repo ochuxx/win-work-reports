@@ -101,7 +101,7 @@ def _(dt):
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
     DATE_REPORT_INI = dt.date(2026, 9, 1)
-    DATE_REPORT_END = dt.date(2026, 9, 30)
+    DATE_REPORT_END = dt.date(2026, 10, 6)
     return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
@@ -405,7 +405,9 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Reescalación a valores reales repartidos por señales según su porcentaje
+    Reescalación a valores reales repartidos por señales según su porcentaje.
+
+    (**Aquí se puede descargar la información de visualizaciones por señales en días**)
     """)
     return
 
@@ -447,7 +449,7 @@ def _(df_views_filt, df_views_title_filt, display, pl):
     df_views_scaler = df_views_scaler.drop(['Porcent'])
     df_views_scaler = df_views_scaler.rename({'Total views': 'Total views (escalado)'})
 
-    display(df_views_scaler.head(6))
+    display(df_views_scaler)
     return (df_views_scaler,)
 
 
