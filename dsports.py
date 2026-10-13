@@ -100,8 +100,8 @@ def _(dt):
 
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
-    DATE_REPORT_INI = dt.date(2026, 9, 1)
-    DATE_REPORT_END = dt.date(2026, 10, 6)
+    DATE_REPORT_INI = dt.date(2026, 9, 28)
+    DATE_REPORT_END = dt.date(2026, 10, 12)
     return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
@@ -996,12 +996,32 @@ def _(mo):
 
 
 @app.cell
-def _(pl, plt):
+def _(dt, pl, plt):
+    # Abreviaturas de meses en español para el título del eje X
+    _MESES_ABREV = {
+        1: 'ene', 2: 'feb', 3: 'mar', 4: 'abr', 5: 'may', 6: 'jun',
+        7: 'jul', 8: 'ago', 9: 'sep', 10: 'oct', 11: 'nov', 12: 'dic',
+    }
+
+
+    def _fmt_fecha_esp(fecha):
+        """Formatea una fecha/datetime como '3 oct', '4 sep', '15 ene', etc."""
+        if fecha is None:
+            return ''
+        if isinstance(fecha, str):
+            fecha = dt.date.fromisoformat(fecha[:10])
+        if isinstance(fecha, dt.datetime):
+            fecha = fecha.date()
+        return f'{fecha.day} {_MESES_ABREV[fecha.month]}'
+
+
     def plot_concurrencia_multi_senal(
         series,
         title='Concurrencia de reproducción apilada por señal',
         figsize=(13, 5),
         fill_alpha=0.9,
+        date_ini=None,
+        date_end=None,
     ):
         """Concurrencia apilada (escalado total) por señal.
 
@@ -1013,6 +1033,8 @@ def _(pl, plt):
         hasta que vuelve a estar presente.
 
         series: lista de tuplas (label, DataFrame con columnas ['ts', 'Concurrencia'], color).
+        date_ini / date_end: rango mostrado en el eje X. Si son None se toma el
+        mínimo/máximo de las marcas de tiempo de `series`.
         """
         labels = [label for label, _, _ in series]
         colors = [color for _, _, color in series]
@@ -1030,14 +1052,21 @@ def _(pl, plt):
         ts = frame['ts'].to_list()
         values = [frame[label].to_list() for label in labels]
 
+        # Rango de fechas para el título del eje X ('3 oct', '4 sep', etc.)
+        if date_ini is None:
+            date_ini = frame['ts'].min()
+        if date_end is None:
+            date_end = frame['ts'].max()
+        xlabel = f'Tiempo desde {_fmt_fecha_esp(date_ini)} hasta {_fmt_fecha_esp(date_end)}'
+
         fig, ax = plt.subplots(figsize=figsize)
         fig.patch.set_alpha(0)
         ax.patch.set_alpha(0)
 
         ax.stackplot(ts, *values, labels=labels, colors=colors, alpha=fill_alpha, linewidth=0)
 
-        ax.set_title(title)
-        ax.set_xlabel('Tiempo')
+        ax.set_title(title, fontweight='bold')
+        ax.set_xlabel(xlabel, fontweight='bold')
         ax.set_ylabel('Reproducciones')
         ax.grid(True, alpha=0.2, axis='y')
         ax.legend(loc='upper left', frameon=False, ncol=2, fontsize=9)
@@ -1068,6 +1097,166 @@ def _(
     ]
 
     plot_concurrencia_multi_senal(_series_senales_all)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Descarga de gráficas
+
+    Dos botones para bajar un PNG (200 dpi, fondo blanco) de cada gráfico del reporte:
+
+    - **Comparación señales**: el Gráfico 1 tal cual, 5 filas con la concurrencia reescalada de cada señal junto a su tarjeta KPI de vistas totales.
+    - **Concurrencia apilada**: el Gráfico 2, concurrencia total segmentada por señal.
+
+    Los PNG se reconstruyen con los mismos datos del notebook, así que se actualizan al re-ejecutarlo.
+    """)
+    return
+
+
+@app.cell
+def _(
+    df_DSPORTS,
+    df_DSPORTS_2,
+    df_WIN_AUDIO,
+    df_WIN_FUTBOL,
+    df_WIN_SPORTS,
+    df_kpi_por_senal,
+    pl,
+    plt,
+):
+    import io
+    from matplotlib.patches import FancyBboxPatch, Rectangle
+
+    # Series de concurrencia por señal con su color (los mismos que en los gráficos).
+    SENALES_SERIES = [
+        ('WIN+FUTBOL', df_WIN_FUTBOL, '#ff5500'),
+        ('WIN SPORTS', df_WIN_SPORTS, '#d839ff'),
+        ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
+        ('DSPORTS', df_DSPORTS, '#0ba4e5'),
+        ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
+    ]
+
+
+    def render_senal_on_ax(ax, senal_df, title, color):
+        """Dibuja la concurrencia de una señal con el estilo del gráfico 1."""
+        ts = senal_df['ts'].to_list()
+        valores = senal_df['Concurrencia'].to_list()
+        ax.patch.set_alpha(0)
+        ax.plot(ts, valores, color=color, linewidth=1.5)
+        ax.fill_between(ts, valores, 0, color=color, alpha=0.2)
+        ax.set_title(title, color=color, fontweight='bold')
+        ax.set_ylabel('Reproducciones')
+        ax.grid(True, alpha=0.2, axis='y')
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+
+    def render_kpi_on_ax(ax, signal, total, fecha_min, fecha_max, color):
+        """Dibuja la tarjeta KPI (equivalente a `kpi_card_senal`) sobre un axes."""
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+
+        ax.add_patch(FancyBboxPatch(
+            (0.03, 0.04), 0.94, 0.92,
+            boxstyle='round,pad=0.004,rounding_size=0.05',
+            facecolor='0.55', alpha=0.15, edgecolor='none', clip_on=False,
+        ))
+        ax.add_patch(Rectangle(
+            (0.03, 0.04), 0.045, 0.92,
+            facecolor=color, edgecolor='none', clip_on=False,
+        ))
+
+        if fecha_min is not None and fecha_max is not None:
+            rango = f'Vistas totales\ndesde {fecha_min:%d/%m/%Y}\nhasta {fecha_max:%d/%m/%Y}'
+        else:
+            rango = 'Sin vistas en el\nperiodo del reporte'
+
+        ax.text(0.13, 0.82, signal.upper(), fontsize=9, fontweight='bold', color=color, va='top')
+        ax.text(0.13, 0.63, f'{total:,}', fontsize=20, fontweight='bold', color=color, va='top')
+        ax.text(0.13, 0.42, 'TOTAL VIEWS', fontsize=7.5, color='#666666', va='top')
+        ax.text(0.13, 0.30, rango, fontsize=7.5, color='#666666', va='top', linespacing=1.4)
+
+
+    def build_figura_comparacion():
+        """Reconstruye el gráfico 1 (5 filas: concurrencia + KPI) en una sola figura."""
+        filas = len(SENALES_SERIES)
+        fig, axes = plt.subplots(
+            filas, 2,
+            figsize=(15, 3.4 * filas),
+            gridspec_kw={'width_ratios': [3, 1], 'hspace': 0.45, 'wspace': 0.05},
+        )
+        if filas == 1:
+            axes = axes.reshape(1, -1)
+
+        for i, (signal, senal_df, color) in enumerate(SENALES_SERIES):
+            fila_kpi = df_kpi_por_senal.filter(pl.col('Title') == signal)
+            total = int(fila_kpi['Total vistas'][0]) if fila_kpi.height else 0
+            fmin = fila_kpi['Fecha min'][0] if fila_kpi.height else None
+            fmax = fila_kpi['Fecha max'][0] if fila_kpi.height else None
+            render_senal_on_ax(axes[i, 0], senal_df, signal, color)
+            render_kpi_on_ax(axes[i, 1], signal, total, fmin, fmax, color)
+
+        fig.autofmt_xdate()
+        return fig
+
+
+    def figura_a_png_bytes(fig, dpi=200):
+        """Serializa una figura de matplotlib a PNG (fondo blanco) y la libera."""
+        fig.patch.set_facecolor('white')
+        fig.patch.set_alpha(1)
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format='png', dpi=dpi, facecolor='white', bbox_inches='tight')
+        plt.close(fig)
+        return buffer.getvalue()
+
+
+    return SENALES_SERIES, build_figura_comparacion, figura_a_png_bytes
+
+
+@app.cell
+def _(
+    DATE_REPORT_END,
+    DATE_REPORT_INI,
+    SENALES_SERIES,
+    build_figura_comparacion,
+    figura_a_png_bytes,
+    mo,
+    plot_concurrencia_multi_senal,
+):
+    _periodo = mo.md(
+        f'PNG del reporte: **{DATE_REPORT_INI:%d/%m/%Y} – {DATE_REPORT_END:%d/%m/%Y}**'
+    )
+    _sufijo = f'{DATE_REPORT_INI:%Y%m%d}-{DATE_REPORT_END:%Y%m%d}'
+
+    # Comparación señales: mismo render que `mo.vstack(_filas_senales)`
+    # (5 filas de concurrencia + su tarjeta KPI).
+    _img_comparacion = figura_a_png_bytes(build_figura_comparacion())
+
+    # Concurrencia apilada: mismo render que el Gráfico 2.
+    _img_apilada = figura_a_png_bytes(plot_concurrencia_multi_senal(SENALES_SERIES))
+
+    btn_comparacion = mo.download(
+        _img_comparacion,
+        filename=f'comparacion_senales_{_sufijo}.png',
+        mimetype='image/png',
+        label='Comparación señales',
+    )
+
+    btn_apilada = mo.download(
+        _img_apilada,
+        filename=f'concurrencia_apilada_{_sufijo}.png',
+        mimetype='image/png',
+        label='Concurrencia apilada',
+    )
+
+    mo.vstack([
+        _periodo,
+        mo.hstack([btn_comparacion, btn_apilada], gap=1),
+    ])
+
     return
 
 
