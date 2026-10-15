@@ -97,20 +97,79 @@ def _(df_ct):
 
     _df.head(10)
 
-    df_clean_t = _df.copy()
+    df_adjust_t = _df.copy()
 
-    df_clean_t.head(25)
+    df_adjust_t.head(5)
+    return (df_adjust_t,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Transforming information
+    """)
+    return
+
+
+@app.cell
+def _(df_adjust_t, pd):
+    # Renombrar algunas columnas
+    df_clean_t = df_adjust_t.copy()
+
+    df_clean_t = df_clean_t.rename(
+        columns={
+            'Subscriber_ID': 'customer_id',
+            'customer_name': 'customer_first_name',
+            'customer_lastname': 'customer_last_name',
+            'Payment_Processor': 'customerpurchase_gateway',
+            'Transaction_Type': 'customerpurchase_type',
+            'purchasepayment_date_created': 'customerpurchase_date_created',
+            'Country_Code': 'customerpurchase_country_code',
+            'Local_Amount': 'purchasepayment_amount',
+            'Local_Currency': 'purchasepayment_currency',
+            'Transaction_Status': 'purchasepayment_status',
+            'Transaction_Cycle_ID': 'purchasepayment_id',
+            'Transaction_External_ID': 'purchasepayment_transaction_id',
+            'Payment_Method_ID': 'purchasepayment_payment_method',
+            'Coupon_Promotion_Name': 'coupongroup_name',
+            'Coupon_Code': 'coupon_code',
+            'Coupon_Discount_Type': 'coupon_percent_or_day',
+            'Datetime': 'purchasepayment_date_created'
+        }
+    )
+
+    # Cambiar nombre de valores
+    df_clean_t.loc[df_clean_t['customerpurchase_gateway'] == 'affiliates', 'customerpurchase_gateway'] = 'platform'
+    df_clean_t.loc[df_clean_t['customerpurchase_gateway'] == 'freepass', 'customerpurchase_gateway'] = 'coupon'
+
+    # Convertir fechas str a datetime
+    df_clean_t["customerpurchase_date_created"] = df_clean_t["customerpurchase_date_created"].str[:-5]
+    df_clean_t["purchasepayment_date_created"] = df_clean_t["purchasepayment_date_created"].str[:-5]
+    df_clean_t["customerpurchase_valid_until"] = df_clean_t["customerpurchase_valid_until"].str[:-5]
+    df_clean_t["customerpurchase_date_created"] = pd.to_datetime(df_clean_t["customerpurchase_date_created"])
+    df_clean_t["purchasepayment_date_created"] = pd.to_datetime(df_clean_t["purchasepayment_date_created"])
+    df_clean_t["customerpurchase_valid_until"] = pd.to_datetime(df_clean_t["customerpurchase_valid_until"])
+
+    df_clean_t.head(20)
     return (df_clean_t,)
 
 
 @app.cell
 def _(df_clean_t, display):
-    display(df_clean_t['Transaction_Type'].value_counts())
-    display(df_clean_t['Transaction_Status'].value_counts())
-    display(df_clean_t['purchasepayment_partial_refund'].value_counts())
-    display(df_clean_t[df_clean_t['Transaction_Type'] == 'SUBSCRIPTION_ADDON'])
+    # display(df_clean_t['customerpurchase_type'].value_counts())
+    # display(df_clean_t['purchasepayment_transaction_id'].value_counts())
+    # display(df_clean_t['purchasepayment_partial_refund'].value_counts())
+    # display(df_clean_t['customerpurchase_gateway'].value_counts())
+    # df_count = pd.DataFrame(df_clean_t['purchasepayment_amount'].value_counts())
+    # df_count = df_count.sort_values('purchasepayment_amount')
+    # display(df_count)
+    display(df_clean_t[df_clean_t['customerpurchase_gateway'] == 'access'])
 
-    display(df_clean_t[df_clean_t['Subscriber_ID'] == '67b106de199c1a00081096d4'])
+    display(df_clean_t[df_clean_t['customer_id'] == '67b106de199c1a00081096d4'])
+
+    print(df_clean_t.info())
+    print(df_clean_t['purchasepayment_date_created'].min())
+    print(df_clean_t['purchasepayment_date_created'].max())
     return
 
 
