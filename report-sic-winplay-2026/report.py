@@ -236,7 +236,7 @@ def _(pl, res):
         )
         .sort("Total vistas", descending=True)
     )
-    return df_views_day, df_views_scaler
+    return df_signal_concurrency, df_signal_pct, df_views_day, df_views_scaler
 
 
 @app.cell
@@ -295,6 +295,395 @@ def _(df_views_day, df_views_scaler, mo, pl):
             _ejemplo,
         ]
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Configuración de señales cada 15 minutos con los helpers
+    """)
+    return
+
+
+@app.cell
+def _(Path, pl):
+    # ══════════════════════ 15 min · helpers optimizados ══════════════════════
+
+    BUCKET_MINUTES = 15
+    BUCKET_EVERY = f"{BUCKET_MINUTES}m"
+
+    VALUE_COL_CANDIDATES = ("active_streams", "Concurrencia", "concurrencia", "active")
+
+
+    def agregar_eventos_15m_por_senal(
+        senal: str,
+        serie: pl.DataFrame,
+        value_col: str | None = None,
+    ) -> pl.DataFrame:
+        """
+        Agrega una serie por señal a bloques de 15 minutos.
+
+        La columna de valor (streams concurrentes) se detecta automáticamente
+        (`active_streams`, `Concurrencia`, ...) o se pasa explícitamente con
+        `value_col`. Se procesa una señal por vez y se devuelve una tabla
+        pequeña: esto evita concatenar todas las señales crudas en memoria.
+        """
+        if value_col is None:
+            for _cand in VALUE_COL_CANDIDATES:
+                if _cand in serie.columns:
+                    value_col = _cand
+                    break
+            else:
+                raise ValueError(
+                    f"La serie de '{senal}' no tiene columna de valor "
+                    f"(esperaba alguna de {VALUE_COL_CANDIDATES}); "
+                    f"columnas disponibles: {serie.columns}"
+                )
+
+        return (
+            serie.lazy()
+            .select(
+                pl.col("ts").cast(pl.Datetime("us")).alias("ts"),
+                pl.col(value_col).cast(pl.Float64).fill_null(0.0).alias("streams"),
+            )
+            .filter(pl.col("ts").is_not_null() & (pl.col("streams") > 0))
+            .with_columns(
+                pl.col("ts").dt.truncate(BUCKET_EVERY).alias("time_15"),
+                pl.col("ts").dt.date().alias("day"),
+            )
+            .group_by(["day", "time_15"])
+            .agg(
+                pl.col("streams")
+                .sum()
+                .round(0)
+                .cast(pl.Int64)
+                .alias("eventos_15m")
+            )
+            .collect()
+            .with_columns(pl.lit(senal).alias("senal"))
+            .select(["day", "senal", "time_15", "eventos_15m"])
+            .sort(["day", "senal", "time_15"])
+        )
+
+
+    def repartir_views_por_15m(
+        eventos_15m: pl.LazyFrame,
+        vistas_dia_senal: pl.LazyFrame,
+    ) -> pl.LazyFrame:
+        """
+        Reparte vistas escaladas por día/señal en bloques de 15m.
+
+        Espera:
+            eventos_15m:
+                day, senal, time_15, eventos_15m
+
+            vistas_dia_senal:
+                day, senal, vistas_dia_senal
+
+        Devuelve un LazyFrame para que el notebook controle cuándo
+        materializar el resultado.
+        """
+        return (
+            eventos_15m
+            .join(
+                vistas_dia_senal,
+                on=["day", "senal"],
+                how="left",
+            )
+            .filter(pl.col("vistas_dia_senal") > 0)
+            .with_columns(
+                pl.col("eventos_15m")
+                .sum()
+                .over(["day", "senal"])
+                .alias("eventos_dia_senal")
+            )
+            .with_columns(
+                pl.when(pl.col("eventos_dia_senal") > 0)
+                .then(
+                    pl.col("vistas_dia_senal")
+                    * pl.col("eventos_15m")
+                    / pl.col("eventos_dia_senal")
+                )
+                .otherwise(0.0)
+                .alias("vistas_15m_proporcionales")
+            )
+            .with_columns(
+                pl.col("vistas_15m_proporcionales")
+                .floor()
+                .cast(pl.Int64)
+                .alias("_entero")
+            )
+            .with_columns(
+                (
+                    pl.col("vistas_dia_senal")
+                    - pl.col("_entero")
+                    .sum()
+                    .over(["day", "senal"])
+                )
+                .cast(pl.Int64)
+                .alias("_restantes")
+            )
+            .with_columns(
+                pl.when(pl.col("_restantes") < 0)
+                .then(pl.lit(0, dtype=pl.Int64))
+                .otherwise(pl.col("_restantes"))
+                .alias("_restantes")
+            )
+            .with_columns(
+                pl.len()
+                .over(["day", "senal"])
+                .cast(pl.Int64)
+                .alias("_grupo_rows")
+            )
+            .with_columns(
+                pl.min_horizontal(
+                    pl.col("_restantes"),
+                    pl.col("_grupo_rows"),
+                )
+                .cast(pl.Int64)
+                .alias("_restantes")
+            )
+            .drop("_grupo_rows")
+            .with_columns(
+                pl.col("vistas_15m_proporcionales")
+                .rank(method="ordinal", descending=True)
+                .over(["day", "senal"])
+                .cast(pl.Int64)
+                .alias("_rank")
+            )
+            .with_columns(
+                pl.when(pl.col("_rank") <= pl.col("_restantes"))
+                .then(pl.col("_entero") + 1)
+                .otherwise(pl.col("_entero"))
+                .cast(pl.Int64)
+                .alias("vistas_15m_escaladas")
+            )
+            .with_columns(
+                (
+                    100.0
+                    * pl.col("eventos_15m")
+                    / pl.col("eventos_dia_senal")
+                )
+                .round(3)
+                .alias("peso_eventos_%")
+            )
+            .with_columns(
+                (
+                    100.0
+                    * pl.col("vistas_15m_escaladas")
+                    / pl.col("vistas_dia_senal")
+                )
+                .round(3)
+                .alias("peso_vistas_%")
+            )
+            .drop(["_entero", "_restantes", "_rank"])
+            .sort(["day", "senal", "time_15"])
+        )
+
+
+    def eventos_15m_desde_parquet(
+        paths: list[Path],
+        ts_col: str,
+        senal_col: str,
+        co_col=None,
+    ) -> pl.DataFrame:
+        """
+        Variante para eventos originales en parquet sin cargarlos completos.
+
+        Lee archivo por archivo o carpeta por carpeta, agrega a bloques
+        de 15m y devuelve solo la tabla agregada pequeña.
+        """
+        partes = []
+
+        for p in paths:
+            source = p / "**/*.parquet" if p.is_dir() else p
+            ts_expr = pl.col(ts_col).cast(pl.Datetime("us"))
+
+            lf = pl.scan_parquet(str(source)).filter(ts_expr.is_not_null())
+
+            if co_col is not None:
+                lf = lf.filter(pl.col(co_col) == "CO")
+
+            part = (
+                lf.with_columns(
+                    ts_expr.dt.truncate(BUCKET_EVERY).alias("time_15"),
+                    ts_expr.dt.date().alias("day"),
+                )
+                .group_by(["day", senal_col, "time_15"])
+                .agg(pl.len().alias("eventos_15m"))
+                .rename({senal_col: "senal"})
+                .collect()
+            )
+
+            partes.append(part)
+
+        return (
+            pl.concat(partes, rechunk=False)
+            .sort(["day", "senal", "time_15"])
+        )
+
+    return agregar_eventos_15m_por_senal, repartir_views_por_15m
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Eventos / presencia por bloques 15 mins
+    """)
+    return
+
+
+@app.cell
+def _(
+    agregar_eventos_15m_por_senal,
+    df_signal_concurrency,
+    df_views_scaler,
+    pl,
+    repartir_views_por_15m,
+):
+    _parts_15m = []
+
+    for _senal, _serie in df_signal_concurrency.items():
+        _parts_15m.append(agregar_eventos_15m_por_senal(_senal, _serie))
+
+    df_eventos_15min = (
+        pl.concat(_parts_15m, rechunk=False)
+        .sort(["day", "senal", "time_15"])
+    )
+
+    # Vistas escaladas distribuidas
+    df_views_15min = (
+        repartir_views_por_15m(
+            df_eventos_15min.lazy(),
+            df_views_scaler.lazy().select(
+                "day",
+                "senal",
+                pl.col("Total views (escalado)").alias("vistas_dia_senal"),
+            ),
+        )
+        .collect()
+    )
+
+    # Total agregado por día y bloque de 15min, con desglose por señal
+    _senales_15m = (
+        df_views_15min.group_by("senal")
+        .agg(pl.col("vistas_15m_escaladas").sum().alias("_vistas"))
+        .sort("_vistas", descending=True)["senal"]
+        .to_list()
+    )
+
+    df_views_15min_total = (
+        df_views_15min.lazy()
+        .group_by(["day", "time_15"])
+        .agg(
+            pl.col("vistas_15m_escaladas").sum().alias("vistas_15m"),
+            pl.col("eventos_15m").sum().alias("eventos_15m"),
+            *[
+                pl.col("vistas_15m_escaladas")
+                .filter(pl.col("senal") == _s)
+                .sum()
+                .alias(f"vistas_15m · {_s}")
+                for _s in _senales_15m
+            ],
+        )
+        .collect()
+        .sort(["day", "time_15"])
+    )
+
+    df_views_15min_total
+    return df_eventos_15min, df_views_15min_total
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Comparación contra vistas reales
+    """)
+    return
+
+
+@app.cell
+def _(df_views_15min_total, df_views_day, pl):
+    df_15min_check_day = (
+        df_views_15min_total.lazy()
+        .group_by("day")
+        .agg(pl.col("vistas_15m").sum().alias("vistas_15m_dia"))
+        .join(df_views_day.lazy(), on="day", how="full", coalesce=True)
+        .with_columns(
+            pl.col("vistas_15m_dia").fill_null(0).cast(pl.Int64),
+            pl.col("Total views").fill_null(0).cast(pl.Int64),
+        )
+        .with_columns(
+            (pl.col("vistas_15m_dia") - pl.col("Total views")).alias("diferencia")
+        )
+        .collect()
+        .sort(["diferencia", "day"])
+    )
+
+    df_15min_check_day.filter(pl.col("diferencia") != 0).head(20)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    (Opcional) Vistas escaladas sin bloques de 15 minutos
+    """)
+    return
+
+
+@app.cell
+def _(df_eventos_15min, df_views_scaler, pl):
+    df_views_15min_faltantes = (
+        df_views_scaler.lazy()
+        .filter(pl.col("Total views (escalado)") > 0)
+        .join(
+            df_eventos_15min.lazy()
+            .select(["day", "senal"])
+            .unique(),
+            on=["day", "senal"],
+            how="anti",
+        )
+        .collect()
+    )
+
+    df_views_15min_faltantes
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Validación de conteo de eventos cada 15 min
+    """)
+    return
+
+
+@app.cell
+def _(df_eventos_15min, df_signal_pct, pl):
+    df_15m_eventos_check = (
+        df_eventos_15min.lazy()
+        .group_by(["day", "senal"])
+        .agg(pl.col("eventos_15m").sum().alias("eventos_15m_sum"))
+        .join(
+            df_signal_pct.lazy().select(["day", "senal", "eventos"]),
+            on=["day", "senal"],
+            how="full",
+            coalesce=True,
+        )
+        .with_columns(
+            pl.col("eventos_15m_sum").fill_null(0).cast(pl.Int64),
+            pl.col("eventos").fill_null(0).cast(pl.Int64),
+        )
+        .with_columns(
+            (pl.col("eventos_15m_sum") - pl.col("eventos")).alias("diferencia")
+        )
+        .collect()
+        .sort(["diferencia", "day", "senal"])
+    )
+
+    df_15m_eventos_check.filter(pl.col("diferencia") != 0).head(50)
     return
 
 
