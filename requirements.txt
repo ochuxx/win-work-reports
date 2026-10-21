@@ -4,3 +4,5 @@ ipython
 seaborn
 pydantic_ai
 plotly
+openpyxl
+matplotlib

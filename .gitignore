@@ -2,4 +2,5 @@
 streaming_data/
 transactions_data/
 __marimo__/
+__pycache__/
 data/
