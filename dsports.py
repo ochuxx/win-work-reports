@@ -100,8 +100,8 @@ def _(dt):
 
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
-    DATE_REPORT_INI = dt.date(2026, 9, 28)
-    DATE_REPORT_END = dt.date(2026, 10, 12)
+    DATE_REPORT_INI = dt.date(2026, 10, 1)
+    DATE_REPORT_END = dt.date(2026, 10, 18)
     return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
@@ -1128,6 +1128,7 @@ def _(
 ):
     import io
     from matplotlib.patches import FancyBboxPatch, Rectangle
+    from matplotlib.colors import to_rgba
 
     # Series de concurrencia por señal con su color (los mismos que en los gráficos).
     SENALES_SERIES = [
@@ -1203,13 +1204,86 @@ def _(
         return fig
 
 
-    def figura_a_png_bytes(fig, dpi=200):
-        """Serializa una figura de matplotlib a PNG (fondo blanco) y la libera."""
+    # --- Exportación a PNG (tema claro) -----------------------------------
+    # marimo, en modo oscuro, deja matplotlib con texto, ejes, ticks y rejilla en
+    # blanco (`text.color`, `axes.labelcolor`, `xtick.color`, `grid.color`).
+    # Las figuras del notebook se dibujan con fondo transparente, así que en
+    # pantalla se ven bien, pero al volcarlas a un PNG de fondo blanco los títulos,
+    # etiquetas, ticks y leyendas (blancos) desaparecían. Por eso la exportación se
+    # hace siempre con este tema claro.
+    EXPORT_TEXTO = '#1a1a1a'
+    EXPORT_RC = {
+        'figure.facecolor': 'white',
+        'savefig.facecolor': 'white',
+        'axes.facecolor': 'white',
+        'text.color': EXPORT_TEXTO,
+        'axes.labelcolor': EXPORT_TEXTO,
+        'axes.titlecolor': EXPORT_TEXTO,
+        'xtick.color': EXPORT_TEXTO,
+        'ytick.color': EXPORT_TEXTO,
+        'axes.edgecolor': EXPORT_TEXTO,
+        'grid.color': EXPORT_TEXTO,
+        'legend.labelcolor': EXPORT_TEXTO,
+        'legend.edgecolor': EXPORT_TEXTO,
+    }
+
+
+    def _es_color_claro(color):
+        """True si el color es casi blanco (texto heredado del tema oscuro)."""
+        try:
+            r, g, b, _ = to_rgba(color)
+        except (ValueError, TypeError):
+            return False
+        return (r + g + b) / 3 >= 0.85
+
+
+    def tema_claro_figura(fig):
+        """Fondo blanco y textos oscuros en una figura ya construida."""
         fig.patch.set_facecolor('white')
         fig.patch.set_alpha(1)
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format='png', dpi=dpi, facecolor='white', bbox_inches='tight')
-        plt.close(fig)
+        for ax in fig.get_axes():
+            ax.set_facecolor('white')
+            ax.patch.set_alpha(0)
+            if _es_color_claro(ax.title.get_color()):
+                ax.title.set_color(EXPORT_TEXTO)
+            for eje in (ax.xaxis, ax.yaxis):
+                if _es_color_claro(eje.label.get_color()):
+                    eje.label.set_color(EXPORT_TEXTO)
+                for tick in eje.get_major_ticks() + eje.get_minor_ticks():
+                    tick.label1.set_color(EXPORT_TEXTO)
+                    tick.label2.set_color(EXPORT_TEXTO)
+            leg = ax.get_legend()
+            if leg is not None:
+                for txt in leg.get_texts():
+                    if _es_color_claro(txt.get_color()):
+                        txt.set_color(EXPORT_TEXTO)
+                marco = leg.get_frame()
+                marco.set_edgecolor(EXPORT_TEXTO)
+                if _es_color_claro(marco.get_facecolor()):
+                    marco.set_facecolor('white')
+        return fig
+
+
+    def figura_a_png_bytes(fig_o_builder, dpi=200):
+        """Serializa a PNG una figura o una función que la construye.
+
+        Conviene pasar la función (`build_figura_comparacion`, `lambda: ...`) para
+        que la figura se cree ya dentro del tema claro y todos los textos nazcan
+        con color oscuro. También se acepta una figura ya construida: en ese caso se
+        recolorean sus textos claros y se fuerza el fondo blanco.
+        """
+        with plt.rc_context(EXPORT_RC):
+            fig = fig_o_builder() if callable(fig_o_builder) else fig_o_builder
+            fig = tema_claro_figura(fig)
+            buffer = io.BytesIO()
+            fig.savefig(
+                buffer,
+                format='png',
+                dpi=dpi,
+                facecolor='white',
+                bbox_inches='tight',
+            )
+            plt.close(fig)
         return buffer.getvalue()
 
 
@@ -1232,11 +1306,14 @@ def _(
     _sufijo = f'{DATE_REPORT_INI:%Y%m%d}-{DATE_REPORT_END:%Y%m%d}'
 
     # Comparación señales: mismo render que `mo.vstack(_filas_senales)`
-    # (5 filas de concurrencia + su tarjeta KPI).
-    _img_comparacion = figura_a_png_bytes(build_figura_comparacion())
+    # (5 filas de concurrencia + su tarjeta KPI). Se pasa el *builder* para que la
+    # figura se cree dentro del tema claro de exportación.
+    _img_comparacion = figura_a_png_bytes(build_figura_comparacion)
 
     # Concurrencia apilada: mismo render que el Gráfico 2.
-    _img_apilada = figura_a_png_bytes(plot_concurrencia_multi_senal(SENALES_SERIES))
+    _img_apilada = figura_a_png_bytes(
+        lambda: plot_concurrencia_multi_senal(SENALES_SERIES)
+    )
 
     btn_comparacion = mo.download(
         _img_comparacion,
