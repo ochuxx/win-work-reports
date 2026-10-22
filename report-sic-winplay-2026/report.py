@@ -17,7 +17,7 @@ def _():
     import polars as pl
     from IPython.display import display
 
-    return Path, mo, os, pl
+    return Path, dt, mo, os, pl
 
 
 @app.cell(hide_code=True)
@@ -528,6 +528,7 @@ def _(Path, pl):
     return (
         BUCKET_EVERY,
         BUCKET_MINUTES,
+        VALUE_COL_CANDIDATES,
         agregar_eventos_15m_por_senal,
         repartir_views_por_15m,
     )
@@ -1310,6 +1311,436 @@ def _(df_tabla, df_usuarios_15min, grid_stream, mo, pl):
             df_stream_porcanal,
             df_stream_vs_referencia,
         ]
+    )
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Métricas por programa basadas en scripts de concurrencia y tiempo
+
+    Se toman los campos que quedaron pendientes y se llenan usando la misma ventana
+    redondeada de 15 minutos que `Play back` y `Stream`, pero ahora con la concurrencia
+    por minuto ya calculada por señal (`df_signal_concurrency`).
+
+    Definiciones aplicadas:
+
+    - `Time (minutos)`: sumatoria de la concurrencia minuto a minuto en los bloques del
+      evento. Es el total de minutos-vista consumidos dentro del lapso.
+    - `Time Averange (minutos)`: `Time (minutos) / Play back`.
+    - `Peak WSO`: máximo de usuarios/streams concurrentes observado en los lapsos de 5
+      minutos dentro del evento.
+    - `Activos`: copia de `Play back`.
+    - `Peso% Stream`: `Stream / Play back`, expresado como porcentaje y recortado a
+      `100%` cuando por métricas superpuestas resulte mayor.
+    - `peso% peak`: `Peak WSO / Play back`, expresado como porcentaje y recortado a
+      `100%`.
+    - `Duracion_minutos`: minutos completos entre `Hora Inicio` y `Hora Final` de la
+      parrilla, con ajuste si el evento cruza medianoche.
+    - `% de consumo`: `Time (minutos) / (Play back × Duracion_minutos)`, como porcentaje
+      del consumo ideal si todas las vistas hubieran visto el evento completo. Se limita
+      a `100%`.
+    """)
+
+    return
+
+
+@app.cell
+def _(
+    BUCKET_EVERY,
+    BUCKET_MINUTES,
+    CANAL_SENALES: dict[str, list[str]],
+    MINUTOS_DIA,
+    VALUE_COL_CANDIDATES,
+    bloque_15m,
+    df_signal_concurrency,
+    minutos_absolutos,
+    pl,
+):
+    # ══════════════════════ MÉTRICAS DE CONSUMO / PICO / PESOS ══════════════════════
+    SENALES_METRICAS = sorted({s for ss in CANAL_SENALES.values() for s in ss})
+    METRICS_VERSION = "v1"
+
+
+    def df_conc_15m_por_canal_desde_concurrencia() -> pl.DataFrame:
+        """
+        Construye una tabla por día/canal/bloque 15m con tiempo y pico de concurrencia.
+
+        Parte de `df_signal_concurrency`, que ya aplica la metodología del script 1:
+        streams activos en una ventana rodante de concurrencia. Para cada canal:
+
+        - `Time (minutos)`: suma de la concurrencia por minuto dentro del bloque.
+        - `Peak WSO`: máximo de la concurrencia por minuto dentro del bloque.
+        """
+        canal_senal = pl.DataFrame(
+            {
+                "Canal": [canal for canal, ss in CANAL_SENALES.items() for _ in ss],
+                "senal": [senal for ss in CANAL_SENALES.values() for senal in ss],
+            }
+        ).unique(["Canal", "senal"])
+
+        partes: list[pl.DataFrame] = []
+
+        for _senal, _serie in df_signal_concurrency.items():
+            if _senal not in SENALES_METRICAS:
+                continue
+
+            _value_col = next(
+                (_c for _c in VALUE_COL_CANDIDATES if _c in _serie.columns),
+                None,
+            )
+            if _value_col is None:
+                continue
+
+            partes.append(
+                _serie.lazy()
+                .select(
+                    pl.col("ts").cast(pl.Datetime("us")).alias("ts"),
+                    pl.col(_value_col)
+                    .cast(pl.Float64)
+                    .fill_null(0.0)
+                    .alias("streams"),
+                )
+                .filter(pl.col("ts").is_not_null() & (pl.col("streams") > 0))
+                .with_columns(pl.lit(_senal).alias("senal"))
+                .collect()
+            )
+
+        if not partes:
+            return pl.DataFrame(
+                schema={
+                    "day": pl.Date,
+                    "Canal": pl.Utf8,
+                    "time_15": pl.Datetime("us"),
+                    "Time (minutos)": pl.Int64,
+                    "Peak WSO": pl.Int64,
+                }
+            )
+
+        df_conc_senales = pl.concat(partes, rechunk=False).join(
+            canal_senal,
+            on="senal",
+            how="inner",
+        )
+
+        if df_conc_senales.height == 0:
+            return pl.DataFrame(
+                schema={
+                    "day": pl.Date,
+                    "Canal": pl.Utf8,
+                    "time_15": pl.Datetime("us"),
+                    "Time (minutos)": pl.Int64,
+                    "Peak WSO": pl.Int64,
+                }
+            )
+
+        df_conc_1m = (
+            df_conc_senales.with_columns(
+                pl.col("ts").dt.date().alias("day"),
+                pl.col("ts").dt.truncate("1m").alias("minute"),
+            )
+            .group_by(["day", "Canal", "minute"])
+            .agg(
+                pl.col("streams")
+                .sum()
+                .round(0)
+                .cast(pl.Int64)
+                .alias("active_streams")
+            )
+        )
+
+        return (
+            df_conc_1m.with_columns(
+                pl.col("minute").dt.truncate(BUCKET_EVERY).alias("time_15"),
+            )
+            .group_by(["day", "Canal", "time_15"])
+            .agg(
+                pl.col("active_streams").sum().cast(pl.Int64).alias("Time (minutos)"),
+                pl.col("active_streams").max().cast(pl.Int64).alias("Peak WSO"),
+            )
+            .sort(["day", "Canal", "time_15"])
+        )
+
+
+    def metricas_por_programa_desde_15m(
+        parrilla: pl.DataFrame,
+        tiempo_pico_15m: pl.DataFrame,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        Llena Time, Peak WSO, Activos, pesos, duración y consumo usando la misma
+        ventana redondeada de 15 minutos que `Play back` y `Stream`.
+        """
+        tiempo_bloque = tiempo_pico_15m.select(
+            "day",
+            "Canal",
+            (
+                pl.col("time_15").dt.hour().cast(pl.Int32) * 60
+                + pl.col("time_15").dt.minute().cast(pl.Int32)
+            ).alias("minuto_bloque"),
+            pl.col("Time (minutos)").cast(pl.Int64).alias("_time_minutos"),
+            pl.col("Peak WSO").cast(pl.Int64).alias("_peak"),
+        )
+
+        detalle = (
+            parrilla.with_row_index("_fila")
+            .select(
+                "_fila",
+                "Fecha",
+                "Canal",
+                "Programa",
+                pl.col("Hora Inicio").alias("hora_inicio"),
+                pl.col("Hora Final").alias("hora_final"),
+                "Play back",
+                "Stream",
+            )
+            .with_columns(
+                bloque_15m(minutos_absolutos("Fecha", "hora_inicio")).alias("_b_ini"),
+                bloque_15m(minutos_absolutos("Fecha", "hora_final")).alias("_b_fin"),
+            )
+            .with_columns(
+                pl.when(pl.col("_b_fin") < pl.col("_b_ini"))
+                .then(pl.col("_b_fin") + MINUTOS_DIA)
+                .otherwise(pl.col("_b_fin"))
+                .alias("_b_fin")
+            )
+            .with_columns(
+                (
+                    (pl.col("_b_fin") - pl.col("_b_ini")) // BUCKET_MINUTES + 1
+                ).alias("_n_bloques")
+            )
+            .with_columns(
+                (
+                    pl.col("_b_ini")
+                    + pl.int_ranges(0, pl.col("_n_bloques")) * BUCKET_MINUTES
+                ).alias("_min_bloque")
+            )
+            .explode("_min_bloque")
+            .with_columns(
+                (pl.col("_min_bloque") // MINUTOS_DIA).cast(pl.Date).alias("day"),
+                (pl.col("_min_bloque") % MINUTOS_DIA).alias("minuto_bloque"),
+            )
+            .join(tiempo_bloque, on=["day", "Canal", "minuto_bloque"], how="left")
+            .with_columns(
+                pl.col("_time_minutos").fill_null(0).cast(pl.Int64),
+                pl.col("_peak").fill_null(0).cast(pl.Int64),
+                pl.col("Play back").fill_null(0).cast(pl.Int64),
+                pl.col("Stream").fill_null(0).cast(pl.Int64),
+            )
+            .sort(["_fila", "minuto_bloque"])
+        )
+
+        metrics = (
+            detalle.group_by("_fila")
+            .agg(
+                pl.col("_time_minutos").sum().cast(pl.Int64).alias("_time_minutos"),
+                pl.col("_peak").max().cast(pl.Int64).alias("_peak"),
+                pl.col("minuto_bloque").n_unique().alias("_bloques_metricas"),
+            )
+        )
+
+        base = (
+            parrilla.with_row_index("_fila")
+            .join(metrics, on="_fila", how="left")
+            .with_columns(
+                pl.col("_time_minutos").fill_null(0).cast(pl.Int64),
+                pl.col("_peak").fill_null(0).cast(pl.Int64),
+                pl.col("_bloques_metricas").fill_null(0).cast(pl.Int64),
+                pl.col("Play back").fill_null(0).cast(pl.Int64),
+                pl.col("Stream").fill_null(0).cast(pl.Int64),
+            )
+        )
+
+        ini_sec = (
+            pl.col("Hora Inicio")
+            .dt.hour()
+            .cast(pl.Int64)
+            * 3600
+            + pl.col("Hora Inicio").dt.minute().cast(pl.Int64) * 60
+            + pl.col("Hora Inicio").dt.second().cast(pl.Int64)
+        )
+        fin_sec = (
+            pl.col("Hora Final")
+            .dt.hour()
+            .cast(pl.Int64)
+            * 3600
+            + pl.col("Hora Final").dt.minute().cast(pl.Int64) * 60
+            + pl.col("Hora Final").dt.second().cast(pl.Int64)
+        )
+        dur_sec = fin_sec - ini_sec
+
+        duracion_min = (
+            pl.when(dur_sec < 0)
+            .then(dur_sec + 86400)
+            .otherwise(dur_sec)
+            .cast(pl.Float64)
+            / 60.0
+        ).floor().cast(pl.Int64).alias("Duracion_minutos")
+
+        base = base.with_columns(
+            pl.col("_time_minutos").alias("Time (minutos)"),
+            pl.col("_peak").alias("Peak WSO"),
+            pl.col("Play back").alias("Activos"),
+            duracion_min,
+        )
+
+        base = base.with_columns(
+            pl.when(pl.col("Play back") > 0)
+            .then(pl.col("_time_minutos") / pl.col("Play back"))
+            .otherwise(0.0)
+            .round(2)
+            .alias("Time Averange (minutos)"),
+        )
+
+        base = base.with_columns(
+            pl.when(pl.col("Play back") > 0)
+            .then(100.0 * pl.col("Stream") / pl.col("Play back"))
+            .otherwise(0.0)
+            .clip(0.0, 100.0)
+            .round(2)
+            .alias("Peso% Stream"),
+            pl.when(pl.col("Play back") > 0)
+            .then(100.0 * pl.col("_peak") / pl.col("Play back"))
+            .otherwise(0.0)
+            .clip(0.0, 100.0)
+            .round(2)
+            .alias("peso% peak"),
+        )
+
+        ideal_minutos = pl.col("Play back") * pl.col("Duracion_minutos")
+
+        base = base.with_columns(
+            pl.when((pl.col("Play back") > 0) & (ideal_minutos > 0))
+            .then(100.0 * pl.col("_time_minutos") / ideal_minutos)
+            .otherwise(0.0)
+            .clip(0.0, 100.0)
+            .round(2)
+            .alias("% de consumo"),
+        )
+
+        final = base.drop(["_fila", "_time_minutos", "_peak", "_bloques_metricas"])
+
+        return detalle, final
+
+
+    return (
+        df_conc_15m_por_canal_desde_concurrencia,
+        metricas_por_programa_desde_15m,
+    )
+
+
+@app.cell
+def _(
+    df_conc_15m_por_canal_desde_concurrencia,
+    grid_stream,
+    metricas_por_programa_desde_15m,
+):
+    df_conc_metrics_15m = df_conc_15m_por_canal_desde_concurrencia()
+
+    df_metricas_detalle, grid_report = metricas_por_programa_desde_15m(
+        grid_stream,
+        df_conc_metrics_15m,
+    )
+
+    grid_report
+
+    return (grid_report,)
+
+
+@app.cell
+def _(grid_report, mo, pl):
+    df_report_summary = (
+        grid_report.group_by("Canal")
+        .agg(
+            pl.len().alias("Programas"),
+            pl.col("Stream").sum().alias("Stream"),
+            pl.col("Play back").sum().alias("Play back"),
+            pl.col("Time (minutos)").sum().alias("Time (minutos)"),
+            pl.col("Peak WSO").max().alias("Peak WSO máx"),
+            pl.col("% de consumo").mean().round(2).alias("% consumo medio"),
+        )
+        .sort("Time (minutos)", descending=True)
+    )
+
+    _df_report_nulls = grid_report.filter(
+        pl.col("Time (minutos)").is_null()
+        | pl.col("Peak WSO").is_null()
+        | pl.col("Activos").is_null()
+        | pl.col("Duracion_minutos").is_null()
+    )
+
+    _df_report_sample = grid_report.select(
+        "Fecha",
+        "Canal",
+        "Programa",
+        "Hora Inicio",
+        "Hora Final",
+        "Stream",
+        "Play back",
+        "Time (minutos)",
+        "Time Averange (minutos)",
+        "Peak WSO",
+        "Activos",
+        "Peso% Stream",
+        "peso% peak",
+        "Duracion_minutos",
+        "% de consumo",
+    ).head(20)
+
+    mo.vstack(
+        [
+            mo.md(
+                f"**Reporte con métricas completas:** {grid_report.height:,} programas · "
+                f"{grid_report.filter(pl.col('Time (minutos)') > 0).height:,} con Time &gt; 0 · "
+                f"{grid_report.filter(pl.col('Peak WSO') > 0).height:,} con Peak &gt; 0"
+            ),
+            df_report_summary,
+            _df_report_sample,
+            mo.md(f"**Filas con campos principales nulos:** {_df_report_nulls.height}"),
+        ]
+    )
+
+    return
+
+
+@app.cell
+def _(dt, grid_report, mo):
+    import base64
+    import io
+
+    report_filename = f"report_sic_winplay_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    report_csv_buffer = io.StringIO()
+    grid_report.write_csv(report_csv_buffer)
+    report_csv_bytes = report_csv_buffer.getvalue().encode("utf-8-sig")
+
+    report_csv_b64 = base64.b64encode(report_csv_bytes).decode("ascii")
+    report_csv_uri = f"data:text/csv;base64,{report_csv_b64}"
+
+    mo.Html(
+        f"""
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px;">
+          <a
+            href="{report_csv_uri}"
+            download="{report_filename}"
+            style="
+              display:inline-block;
+              padding:8px 14px;
+              background:#ff5500;
+              color:white;
+              text-decoration:none;
+              border-radius:6px;
+              font-weight:600;
+            "
+          >
+            ⬇ Descargar reporte CSV
+          </a>
+          <span style="opacity:0.7;">
+            {grid_report.height:,} filas · {len(grid_report.columns)} columnas
+          </span>
+        </div>
+        """
     )
 
     return
