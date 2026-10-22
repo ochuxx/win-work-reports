@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.1"
+__generated_with = "0.25.2"
 app = marimo.App(width="medium")
 
 
@@ -57,7 +57,7 @@ def _(Path, os):
     GRID_XLSX = Path(
         os.environ.get(
             "WINPLAY_GRID",
-            "/home/ochux/Documentos/Work/Reportes/Industria_Comercio_Vistas_WinPlay/"
+            "/mnt/sda1/WinWork/Reports/SIC_2026/"
             "Ejemplo info Win Play.xlsx",
         )
     )
@@ -267,7 +267,9 @@ def _(pl, res):
             (pl.col("Time (minutos)").sum()).round(0).alias("Time (minutos)"),
         )
     )
-    return
+
+    df_tabla.head(20)
+    return (df_tabla,)
 
 
 @app.cell(hide_code=True)
@@ -523,7 +525,12 @@ def _(Path, pl):
             .sort(["day", "senal", "time_15"])
         )
 
-    return agregar_eventos_15m_por_senal, repartir_views_por_15m
+    return (
+        BUCKET_EVERY,
+        BUCKET_MINUTES,
+        agregar_eventos_15m_por_senal,
+        repartir_views_por_15m,
+    )
 
 
 @app.cell(hide_code=True)
@@ -592,7 +599,7 @@ def _(
     )
 
     df_views_15min_total
-    return df_eventos_15min, df_views_15min_total
+    return df_eventos_15min, df_views_15min, df_views_15min_total
 
 
 @app.cell(hide_code=True)
@@ -684,6 +691,627 @@ def _(df_eventos_15min, df_signal_pct, pl):
     )
 
     df_15m_eventos_check.filter(pl.col("diferencia") != 0).head(50)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Agregar información a reporte SIC
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Play back por programa (bloques de 15 min)
+
+    Se llena el campo **`Play back`** de la parrilla con la suma de las vistas de 15 min
+    (`vistas_15m_escaladas`) de las señales que alimentan cada canal:
+
+    | Canal en la parrilla | Señales que se suman |
+    |---|---|
+    | `Win Sports Premium` | `WIN+FUTBOL` + `WIN LITE` + `WIN AUDIO` |
+    | `Win Sports` | `WIN SPORTS` |
+
+    **Regla de redondeo:** la `Hora Inicio` y la `Hora Final` se llevan al bloque de 15
+    minutos **más cercano** y se suman todos los bloques del intervalo, incluidos ambos
+    extremos, en el día de `Fecha` (si la emisión cruza medianoche, el fin pasa al día
+    siguiente).
+
+    > Ejemplo · 15/01/2026 · `Win Sports Premium` · 19:21 → 21:38
+    > 19:21 → **19:15** y 21:38 → **21:45**, así que se suman los bloques 19:15, 19:30, …, 21:45
+    > (11 bloques) de `WIN+FUTBOL`, `WIN LITE` y `WIN AUDIO`.
+    """)
+    return
+
+
+@app.cell
+def _(BUCKET_MINUTES, pl):
+    # ══════════════════════ PLAY BACK DESDE BLOQUES DE 15 MIN ══════════════════════
+    MINUTOS_DIA = 24 * 60
+
+    # Canal de la parrilla → señales del OTT que lo alimentan
+    CANAL_SENALES: dict[str, list[str]] = {
+        "Win Sports Premium": ["WIN+FUTBOL", "WIN LITE", "WIN AUDIO"],
+        "Win Sports": ["WIN SPORTS"],
+    }
+
+
+    def minutos_absolutos(fecha: str, hora: str) -> pl.Expr:
+        """(fecha, hora) → minutos absolutos: días desde epoch × 1440 + minuto del día."""
+        return (
+            pl.col(fecha).dt.date().cast(pl.Int32) * MINUTOS_DIA
+            # dt.hour()/dt.minute() devuelven Int8: hay que castear o desborda
+            + pl.col(hora).dt.hour().cast(pl.Int32) * 60
+            + pl.col(hora).dt.minute().cast(pl.Int32)
+            + pl.col(hora).dt.second().cast(pl.Int32) // 30
+        )
+
+
+    def bloque_15m(minutos: pl.Expr) -> pl.Expr:
+        """Minutos absolutos → bloque de 15 min más cercano (19:21 → 19:15 · 21:38 → 21:45)."""
+        return (((minutos + BUCKET_MINUTES // 2) // BUCKET_MINUTES) * BUCKET_MINUTES).cast(
+            pl.Int64
+        )
+
+
+    def play_back_desde_15m(
+        parrilla: pl.DataFrame,
+        vistas_15m: pl.DataFrame,
+        mapa_senales: dict[str, list[str]] | None = None,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        Llena `Play back` sumando las vistas de 15 min de las señales de cada canal.
+
+        Regla de redondeo: la hora de inicio y la hora final se llevan al bloque de
+        15 min **más cercano** y se suman todos los bloques del intervalo, incluidos
+        ambos extremos (día de `Fecha`; si cruza medianoche se suma un día al fin).
+
+            Win Sports Premium → WIN+FUTBOL + WIN LITE + WIN AUDIO
+            Win Sports         → WIN SPORTS
+
+        Devuelve (detalle fila × señal × bloque, parrilla original con `Play back`).
+        """
+        mapa = mapa_senales or CANAL_SENALES
+        canal_senal = pl.DataFrame(
+            {
+                "Canal": [canal for canal, ss in mapa.items() for _ in ss],
+                "senal": [senal for ss in mapa.values() for senal in ss],
+            }
+        )
+
+        vistas_bloque = vistas_15m.select(
+            "day",
+            "senal",
+            (
+                pl.col("time_15").dt.hour().cast(pl.Int32) * 60
+                + pl.col("time_15").dt.minute().cast(pl.Int32)
+            ).alias("minuto_bloque"),
+            pl.col("vistas_15m_escaladas").cast(pl.Int64).alias("vistas_15m"),
+        )
+
+        detalle = (
+            parrilla.with_row_index("_fila")
+            .select(
+                "_fila",
+                "Fecha",
+                "Canal",
+                "Programa",
+                pl.col("Hora Inicio").alias("hora_inicio"),
+                pl.col("Hora Final").alias("hora_final"),
+            )
+            .with_columns(
+                bloque_15m(minutos_absolutos("Fecha", "hora_inicio")).alias("_b_ini"),
+                bloque_15m(minutos_absolutos("Fecha", "hora_final")).alias("_b_fin"),
+            )
+            # emisión que termina después de medianoche
+            .with_columns(
+                pl.when(pl.col("_b_fin") < pl.col("_b_ini"))
+                .then(pl.col("_b_fin") + MINUTOS_DIA)
+                .otherwise(pl.col("_b_fin"))
+                .alias("_b_fin")
+            )
+            .with_columns(
+                (
+                    (pl.col("_b_fin") - pl.col("_b_ini")) // BUCKET_MINUTES + 1
+                ).alias("_n_bloques")
+            )
+            .with_columns(
+                (
+                    pl.col("_b_ini")
+                    + pl.int_ranges(0, pl.col("_n_bloques")) * BUCKET_MINUTES
+                ).alias("_min_bloque")
+            )
+            .explode("_min_bloque")
+            .with_columns(
+                (pl.col("_min_bloque") // MINUTOS_DIA).cast(pl.Date).alias("day"),
+                (pl.col("_min_bloque") % MINUTOS_DIA).alias("minuto_bloque"),
+            )
+            .join(canal_senal, on="Canal", how="inner")
+            .join(vistas_bloque, on=["day", "senal", "minuto_bloque"], how="left")
+            .with_columns(pl.col("vistas_15m").fill_null(0).cast(pl.Int64))
+            .sort(["_fila", "senal", "minuto_bloque"])
+        )
+
+        play_back = detalle.group_by("_fila").agg(
+            pl.col("vistas_15m").sum().alias("Play back"),
+            pl.col("minuto_bloque").n_unique().alias("Bloques 15m"),
+            (pl.col("vistas_15m") > 0).sum().alias("Bloques-señal con vistas"),
+        )
+
+        parrilla_playback = (
+            parrilla.with_row_index("_fila")
+            .drop("Play back")
+            .join(play_back, on="_fila", how="left")
+            .drop("_fila")
+            .with_columns(
+                pl.col("Play back").fill_null(0).cast(pl.Int64),
+                pl.col("Bloques 15m").fill_null(0).cast(pl.Int64),
+                pl.col("Bloques-señal con vistas").fill_null(0).cast(pl.Int64),
+            )
+            .select([*parrilla.columns, "Bloques 15m", "Bloques-señal con vistas"])
+        )
+
+        return detalle, parrilla_playback
+
+
+    return (
+        CANAL_SENALES,
+        MINUTOS_DIA,
+        bloque_15m,
+        minutos_absolutos,
+        play_back_desde_15m,
+    )
+
+
+@app.cell
+def _(df_views_15min, grid, play_back_desde_15m):
+    df_playback_detalle, grid_playback = play_back_desde_15m(grid, df_views_15min)
+    grid_playback
+    return df_playback_detalle, grid_playback
+
+
+@app.cell
+def _(
+    CANAL_SENALES: dict[str, list[str]],
+    df_tabla,
+    df_views_15min,
+    df_views_day,
+    grid,
+    grid_playback,
+    mo,
+    pl,
+):
+    _senales_parrilla = {s for ss in CANAL_SENALES.values() for s in ss}
+    _senales_con_datos = set(df_views_15min["senal"].unique().to_list())
+    _senales_sin_datos = sorted(_senales_parrilla - _senales_con_datos)
+    _canales_sin_mapa = sorted(set(grid["Canal"].unique().to_list()) - set(CANAL_SENALES))
+    _total_real = int(df_views_day["Total views"].sum())
+    _total_pb = int(grid_playback["Play back"].sum())
+
+
+    df_playback_canal = (
+        grid_playback.group_by("Canal")
+        .agg(
+            pl.len().alias("Programas"),
+            pl.col("Play back").sum().alias("Play back (15m)"),
+            pl.col("Play back").mean().round(0).cast(pl.Int64).alias("Media por programa"),
+            pl.col("Play back").max().alias("Máximo"),
+            (pl.col("Play back") > 0).sum().alias("Programas con vistas"),
+        )
+        .join(
+            df_tabla.group_by("Canal").agg(
+                pl.col("Play back").sum().alias("Play back (OTT, referencia)")
+            ),
+            on="Canal",
+            how="left",
+        )
+        .sort("Play back (15m)", descending=True)
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                f"**Play back estimado con bloques de 15 min:** "
+                f"{_total_pb:,} vistas · "
+                f"{grid_playback.height:,} programas · "
+                f"{(grid_playback['Play back'] > 0).sum():,} con al menos un bloque con vistas  \n"
+                "Regla: hora inicio y hora final se llevan al bloque de 15 min más cercano y se "
+                "suman todos los bloques del intervalo (extremos incluidos), según las señales del canal."
+            ),
+            df_playback_canal,
+            mo.md(
+                "**Señales del mapa sin datos en `vistas_15m`:** "
+                + (", ".join(f"`{s}`" for s in _senales_sin_datos) or "ninguna")
+                + "  \n**Canales sin señales asignadas:** "
+                + (", ".join(f"`{c}`" for c in _canales_sin_mapa) or "ninguno")
+                + f"  \n_Nota:_ la suma por programa **no** es comparable 1:1 con las vistas reales "
+                f"({_total_real:,} en el periodo, {_total_pb / max(_total_real, 1):.0%} de eso): un "
+                "mismo partido se emite en Premium y en Win Sports (se cuenta dos veces) y cada "
+                "señal tiene visualizaciones fuera de la ventana del programa."
+            ),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(df_playback_detalle, mo, pl):
+    _fila_ejemplo = 0  # 15/01/2026 · Win Sports Premium · 19:21 → 21:38
+
+    _det_ejemplo = df_playback_detalle.filter(pl.col("_fila") == _fila_ejemplo)
+
+    df_pb_ejemplo = (
+        _det_ejemplo.with_columns(
+            pl.format(
+                "{}:{}",
+                (pl.col("minuto_bloque") // 60).cast(pl.Utf8).str.zfill(2),
+                (pl.col("minuto_bloque") % 60).cast(pl.Utf8).str.zfill(2),
+            ).alias("bloque")
+        )
+        .group_by("senal")
+        .agg(
+            pl.len().alias("Bloques"),
+            pl.col("bloque").str.join(", ").alias("Bloques 15m usados"),
+            pl.col("vistas_15m").sum().alias("Vistas sumadas"),
+        )
+        .sort("Vistas sumadas", descending=True)
+    )
+
+    _meta = _det_ejemplo.row(0, named=True)
+    _hora_ini = f"{_meta['hora_inicio']:%H:%M}"
+    _hora_fin = f"{_meta['hora_final']:%H:%M}"
+
+    mo.vstack(
+        [
+            mo.md(
+                f"**Ejemplo · {_meta['Fecha']:%d/%m/%Y} · {_meta['Canal']}** — "
+                f"{_meta['Programa']}  \n"
+                f"Intervalo original {_hora_ini} → {_hora_fin}; se suman los bloques de 15 min "
+                f"del intervalo redondeado (extremos incluidos) de las señales del canal.  \n"
+                f"**Play back = {df_pb_ejemplo['Vistas sumadas'].sum():,}**"
+            ),
+            df_pb_ejemplo,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Stream por programa (bloques de 15 min con SubscriberID)
+
+    La columna **`Stream`** sigue la misma mecánica de ventana temporal que `Play back`,
+    pero en lugar de sumar vistas reescaladas usa **`SubscriberID` únicos**.
+
+    Para cada bloque de 15 minutos y por **canal de la parrilla**:
+
+    1. se leen las tablas mensuales concatenadas (`res["paths"]`),
+    2. se filtran eventos de Colombia si `CO_ONLY=True` (`CountryCode == "CO"`),
+    3. se normaliza la señal desde `Title`,
+    4. se asocia la señal al `Canal` usando `CANAL_SENALES`,
+    5. se deduplica `SubscriberID` dentro de `day + Canal + time_15`.
+
+    Después se llena el intervalo del programa con la misma regla de redondeo que
+    `Play back`: `Hora Inicio` y `Hora Final` se llevan al bloque de 15 minutos más
+    cercano y se suman todos los bloques incluidos ambos extremos.
+
+    > Nota: esta métrica deduplica usuarios **dentro de cada bloque de 15 min**.
+    > Si un mismo `SubscriberID` aparece en dos bloques distintos, aparece una vez por
+    > bloque. Para “usuarios únicos de todo el programa” habría que deduplicar
+    > `SubscriberID` sobre todo el intervalo, no bloque a bloque.
+    """)
+    return
+
+
+@app.cell
+def _(
+    BUCKET_EVERY,
+    BUCKET_MINUTES,
+    MINUTOS_DIA,
+    bloque_15m,
+    minutos_absolutos,
+    pl,
+):
+    # ══════════════════════ STREAM DESDE BLOQUES DE 15 MIN ══════════════════════
+    STREAM_VERSION = "v3"
+
+
+    def senal_desde_title_expr(col_title: str = "Title") -> pl.Expr:
+        """Normaliza `Title` a señal para los canales usados en la parrilla."""
+        up = pl.col(col_title).cast(pl.Utf8).str.to_uppercase().str.strip_chars()
+        return (
+            pl.when(up.str.starts_with("WIN PLAY EVENTOS"))
+            .then(pl.lit("WIN PLAY EVENTOS"))
+            .otherwise(up)
+            .alias("senal")
+        )
+
+
+    def usuarios_15min_por_canal_desde_parquet(
+        paths,
+        mapa_senales: dict[str, list[str]],
+        co_only: bool = True,
+    ) -> pl.DataFrame:
+        """
+        Tabla `day + Canal + time_15` con SubscriberID únicos por bloque.
+
+        Se recorre cada parquet mensual y se deduplica `SubscriberID` dentro del
+        bloque de 15 minutos del canal (que puede estar alimentado por varias
+        señales). Esto evita contar dos veces el mismo suscriptor si aparece en
+        más de una señal del mismo canal.
+        """
+        senal_canal = pl.DataFrame(
+            {
+                "Canal": [canal for canal, ss in mapa_senales.items() for _ in ss],
+                "senal": [senal for ss in mapa_senales.values() for senal in ss],
+            }
+        ).unique(["Canal", "senal"])
+
+        senales_mapa = senal_canal["senal"].unique().to_list()
+        partes: list[pl.DataFrame] = []
+
+        for _month, path in paths:
+            lf = pl.scan_parquet(str(path))
+
+            if co_only:
+                lf = lf.filter(pl.col("CountryCode") == "CO")
+
+            part = (
+                lf.select(
+                    pl.col("Date")
+                    .cast(pl.Utf8)
+                    .str.to_datetime(strict=False)
+                    .alias("ts"),
+                    pl.col("SubscriberID").cast(pl.Utf8).alias("SubscriberID"),
+                    senal_desde_title_expr("Title"),
+                )
+                .filter(
+                    pl.col("ts").is_not_null()
+                    & pl.col("SubscriberID").is_not_null()
+                    & (pl.col("SubscriberID") != "")
+                    & pl.col("senal").is_in(senales_mapa)
+                )
+                .join(senal_canal.lazy(), on="senal", how="inner")
+                .with_columns(
+                    pl.col("ts").dt.truncate(BUCKET_EVERY).alias("time_15"),
+                    pl.col("ts").dt.date().alias("day"),
+                )
+                .unique(subset=["day", "Canal", "time_15", "SubscriberID"])
+                .group_by(["day", "Canal", "time_15"])
+                .agg(pl.len().alias("usuarios_15m"))
+                .collect()
+            )
+
+            if part.height:
+                partes.append(part)
+
+        if not partes:
+            return pl.DataFrame(
+                schema={
+                    "day": pl.Date,
+                    "Canal": pl.Utf8,
+                    "time_15": pl.Datetime("us"),
+                    "usuarios_15m": pl.Int64,
+                }
+            )
+
+        return pl.concat(partes, rechunk=False).sort(["day", "Canal", "time_15"])
+
+
+    def stream_por_canal_desde_15m(
+        parrilla: pl.DataFrame,
+        usuarios_15m: pl.DataFrame,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        Llena `Stream` con usuarios únicos por bloque de 15 min.
+
+        Usa la misma ventana de bloques redondeados que `play_back_desde_15m`:
+        inicio y fin al bloque de 15 min más cercano, extremos incluidos.
+
+        Devuelve (detalle fila × bloque, parrilla con `Stream`).
+        """
+        usuarios_bloque = usuarios_15m.select(
+            "day",
+            "Canal",
+            (
+                pl.col("time_15").dt.hour().cast(pl.Int32) * 60
+                + pl.col("time_15").dt.minute().cast(pl.Int32)
+            ).alias("minuto_bloque"),
+            pl.col("usuarios_15m").cast(pl.Int64),
+        )
+
+        detalle = (
+            parrilla.with_row_index("_fila")
+            .select(
+                "_fila",
+                "Fecha",
+                "Canal",
+                "Programa",
+                pl.col("Hora Inicio").alias("hora_inicio"),
+                pl.col("Hora Final").alias("hora_final"),
+            )
+            .with_columns(
+                bloque_15m(minutos_absolutos("Fecha", "hora_inicio")).alias("_b_ini"),
+                bloque_15m(minutos_absolutos("Fecha", "hora_final")).alias("_b_fin"),
+            )
+            .with_columns(
+                pl.when(pl.col("_b_fin") < pl.col("_b_ini"))
+                .then(pl.col("_b_fin") + MINUTOS_DIA)
+                .otherwise(pl.col("_b_fin"))
+                .alias("_b_fin")
+            )
+            .with_columns(
+                (
+                    (pl.col("_b_fin") - pl.col("_b_ini")) // BUCKET_MINUTES + 1
+                ).alias("_n_bloques")
+            )
+            .with_columns(
+                (
+                    pl.col("_b_ini")
+                    + pl.int_ranges(0, pl.col("_n_bloques")) * BUCKET_MINUTES
+                ).alias("_min_bloque")
+            )
+            .explode("_min_bloque")
+            .with_columns(
+                (pl.col("_min_bloque") // MINUTOS_DIA).cast(pl.Date).alias("day"),
+                (pl.col("_min_bloque") % MINUTOS_DIA).alias("minuto_bloque"),
+            )
+            .join(usuarios_bloque, on=["day", "Canal", "minuto_bloque"], how="left")
+            .with_columns(pl.col("usuarios_15m").fill_null(0).cast(pl.Int64))
+            .sort(["_fila", "minuto_bloque"])
+        )
+
+        stream = detalle.group_by("_fila").agg(
+            pl.col("usuarios_15m").sum().alias("Stream"),
+            pl.col("minuto_bloque").n_unique().alias("Bloques 15m Stream"),
+            (pl.col("usuarios_15m") > 0).sum().alias("Bloques con usuarios"),
+        )
+
+        orig_cols = parrilla.columns
+        nuevos_cols = [c for c in stream.columns if c != "_fila" and c not in orig_cols]
+
+        parrilla_stream = (
+            parrilla.with_row_index("_fila")
+            .drop("Stream")
+            .join(stream, on="_fila", how="left")
+            .drop("_fila")
+            .with_columns(
+                pl.col("Stream").fill_null(0).cast(pl.Int64),
+                *(
+                    [
+                        pl.col(c).fill_null(0).cast(pl.Int64)
+                        for c in nuevos_cols
+                    ]
+                ),
+            )
+            .select([*orig_cols, *nuevos_cols])
+        )
+
+        return detalle, parrilla_stream
+
+
+    return (
+        STREAM_VERSION,
+        stream_por_canal_desde_15m,
+        usuarios_15min_por_canal_desde_parquet,
+    )
+
+
+@app.cell
+def _(
+    BUCKET_MINUTES,
+    CANAL_SENALES: dict[str, list[str]],
+    CO_ONLY,
+    Path,
+    STREAM_VERSION,
+    grid_playback,
+    mo,
+    res,
+    stream_por_canal_desde_15m,
+    usuarios_15min_por_canal_desde_parquet,
+):
+    # Cálculo Stream: usuarios únicos por bloque de 15 min y canal
+    paths_stream = tuple((month, str(path)) for month, path in res["paths"])
+    canal_senales_tup = tuple(
+        sorted((canal, tuple(senales)) for canal, senales in CANAL_SENALES.items())
+    )
+
+
+    @mo.cache
+    def _usuarios_15min_cached(
+        paths_tup,
+        mapa_tup,
+        co_only: bool,
+        bucket_minutes: int,
+        stream_version: str,
+    ):
+        mapa = {canal: list(senales) for canal, senales in mapa_tup}
+        return usuarios_15min_por_canal_desde_parquet(
+            [(month, Path(path_str)) for month, path_str in paths_tup],
+            mapa,
+            co_only=co_only,
+        )
+
+
+    df_usuarios_15min = _usuarios_15min_cached(
+        paths_stream,
+        canal_senales_tup,
+        CO_ONLY,
+        BUCKET_MINUTES,
+        STREAM_VERSION,
+    )
+
+    df_stream_detalle, grid_stream = stream_por_canal_desde_15m(
+        grid_playback,
+        df_usuarios_15min,
+    )
+
+    grid_stream
+
+    return df_usuarios_15min, grid_stream
+
+
+@app.cell
+def _(df_tabla, df_usuarios_15min, grid_stream, mo, pl):
+    df_stream_porcanal = (
+        grid_stream.group_by("Canal")
+        .agg(
+            pl.len().alias("Programas"),
+            pl.col("Stream").sum().alias("Stream (15m)"),
+            pl.col("Stream").mean().round(0).cast(pl.Int64).alias("Media por programa"),
+            pl.col("Stream").max().alias("Máximo"),
+            (pl.col("Stream") > 0).sum().alias("Programas con usuarios"),
+        )
+        .sort("Stream (15m)", descending=True)
+    )
+
+    stream_total = int(grid_stream["Stream"].sum())
+    usuarios_15min_total = int(df_usuarios_15min["usuarios_15m"].sum())
+
+    df_stream_vs_referencia = (
+        grid_stream.with_row_index("_fila")
+        .join(
+            df_tabla.with_row_index("_fila")
+            .select(
+                "_fila",
+                pl.col("Stream").alias("Stream OTT (referencia)"),
+                "Estado match",
+            ),
+            on="_fila",
+            how="left",
+        )
+        .drop("_fila")
+        .select(
+            "Fecha",
+            "Canal",
+            "Programa",
+            "Hora Inicio",
+            "Hora Final",
+            "Stream",
+            "Play back",
+            "Stream OTT (referencia)",
+            "Estado match",
+        )
+        .sort("Fecha")
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                f"**Stream estimado con bloques de 15 min:** {stream_total:,} usuarios-bloque · "
+                f"{df_stream_porcanal['Programas'].sum():,} programas · "
+                f"{(grid_stream['Stream'] > 0).sum():,} con al menos un bloque con usuarios  \n"
+                f"`df_usuarios_15min` tiene {df_usuarios_15min.height:,} filas y {usuarios_15min_total:,} usuarios-bloque únicos."
+            ),
+            df_stream_porcanal,
+            df_stream_vs_referencia,
+        ]
+    )
+
     return
 
 
