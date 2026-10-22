@@ -996,14 +996,18 @@ def _(mo):
     4. se asocia la señal al `Canal` usando `CANAL_SENALES`,
     5. se deduplica `SubscriberID` dentro de `day + Canal + time_15`.
 
-    Después se llena el intervalo del programa con la misma regla de redondeo que
-    `Play back`: `Hora Inicio` y `Hora Final` se llevan al bloque de 15 minutos más
-    cercano y se suman todos los bloques incluidos ambos extremos.
+    Para el reporte final, `Stream` **no** es la suma de usuarios por bloque. Se calcula
+    deduplicando `SubscriberID` en todo el intervalo del programa, para que represente
+    usuarios únicos que visualizaron el evento en ese lapso.
 
-    > Nota: esta métrica deduplica usuarios **dentro de cada bloque de 15 min**.
-    > Si un mismo `SubscriberID` aparece en dos bloques distintos, aparece una vez por
-    > bloque. Para “usuarios únicos de todo el programa” habría que deduplicar
-    > `SubscriberID` sobre todo el intervalo, no bloque a bloque.
+    Luego se ajusta `Play back` con esta regla:
+
+    ```text
+    Play back = max(Play back escalado en el lapso, Stream único)
+    ```
+
+    Esto evita que aparezca `Stream > Play back`, lo cual sería imposible si `Play back`
+    representa vistas/visualizadores del mismo lapso.
     """)
     return
 
@@ -1012,13 +1016,14 @@ def _(mo):
 def _(
     BUCKET_EVERY,
     BUCKET_MINUTES,
+    CANAL_SENALES: dict[str, list[str]],
     MINUTOS_DIA,
     bloque_15m,
     minutos_absolutos,
     pl,
 ):
     # ══════════════════════ STREAM DESDE BLOQUES DE 15 MIN ══════════════════════
-    STREAM_VERSION = "v3"
+    STREAM_VERSION = "v4"
 
 
     def senal_desde_title_expr(col_title: str = "Title") -> pl.Expr:
@@ -1195,10 +1200,148 @@ def _(
         return detalle, parrilla_stream
 
 
+    def usuarios_unicos_por_programa_desde_parquet(
+        parrilla: pl.DataFrame,
+        paths,
+        mapa_senales: dict[str, list[str]] | None = None,
+        co_only: bool = True,
+    ) -> pl.DataFrame:
+        """
+        Calcula SubscriberID únicos por programa en la ventana redondeada de 15 min.
+
+        A diferencia de `usuarios_15min_por_canal_desde_parquet`, que deduplica
+        usuario dentro de un bloque, esta función deduplica el `SubscriberID` en
+        todo el intervalo del programa. Por eso `Stream` no debe exceder a las vistas
+        cuando ambos se miden en el mismo lapso.
+        """
+        mapa = mapa_senales or CANAL_SENALES
+
+        senal_canal = pl.DataFrame(
+            {
+                "Canal": [canal for canal, ss in mapa.items() for _ in ss],
+                "senal": [senal for ss in mapa.values() for senal in ss],
+            }
+        ).unique(["Canal", "senal"])
+
+        senales_mapa = senal_canal["senal"].unique().to_list()
+
+        interval_blocks = (
+            parrilla.with_row_index("_fila")
+            .select(
+                "_fila",
+                "Fecha",
+                "Canal",
+                pl.col("Hora Inicio").alias("hora_inicio"),
+                pl.col("Hora Final").alias("hora_final"),
+            )
+            .with_columns(
+                bloque_15m(minutos_absolutos("Fecha", "hora_inicio")).alias("_b_ini"),
+                bloque_15m(minutos_absolutos("Fecha", "hora_final")).alias("_b_fin"),
+            )
+            .with_columns(
+                pl.when(pl.col("_b_fin") < pl.col("_b_ini"))
+                .then(pl.col("_b_fin") + MINUTOS_DIA)
+                .otherwise(pl.col("_b_fin"))
+                .alias("_b_fin")
+            )
+            .with_columns(
+                (
+                    (pl.col("_b_fin") - pl.col("_b_ini")) // BUCKET_MINUTES + 1
+                ).alias("_n_bloques")
+            )
+            .with_columns(
+                (
+                    pl.col("_b_ini")
+                    + pl.int_ranges(0, pl.col("_n_bloques")) * BUCKET_MINUTES
+                ).alias("_min_bloque")
+            )
+            .explode("_min_bloque")
+            .with_columns(
+                (pl.col("_min_bloque") // MINUTOS_DIA).cast(pl.Date).alias("day"),
+                (pl.col("_min_bloque") % MINUTOS_DIA).alias("minuto_bloque"),
+                pl.col("_min_bloque").cast(pl.Int64).alias("block_abs"),
+            )
+            .unique(subset=["_fila", "day", "Canal", "block_abs"])
+            .select(["_fila", "day", "Canal", "block_abs"])
+        )
+
+        if interval_blocks.is_empty():
+            return pl.DataFrame(
+                schema={
+                    "_fila": pl.UInt32,
+                    "usuarios_unicos": pl.Int64,
+                }
+            )
+
+        partes_lf: list[pl.LazyFrame] = []
+
+        for _month, path in paths:
+            lf = pl.scan_parquet(str(path))
+
+            if co_only:
+                lf = lf.filter(pl.col("CountryCode") == "CO")
+
+            lf = (
+                lf.select(
+                    pl.col("Date")
+                    .cast(pl.Utf8)
+                    .str.to_datetime(strict=False)
+                    .alias("ts"),
+                    pl.col("SubscriberID").cast(pl.Utf8).alias("SubscriberID"),
+                    senal_desde_title_expr("Title"),
+                )
+                .filter(
+                    pl.col("ts").is_not_null()
+                    & pl.col("SubscriberID").is_not_null()
+                    & (pl.col("SubscriberID") != "")
+                    & pl.col("senal").is_in(senales_mapa)
+                )
+                .join(senal_canal.lazy(), on="senal", how="inner")
+                .with_columns(
+                    pl.col("ts").dt.truncate(BUCKET_EVERY).alias("time_15"),
+                    pl.col("ts").dt.date().alias("day"),
+                )
+                .with_columns(
+                    (
+                        pl.col("time_15").dt.date().cast(pl.Int64) * MINUTOS_DIA
+                        + pl.col("time_15").dt.hour().cast(pl.Int64) * 60
+                        + pl.col("time_15").dt.minute().cast(pl.Int64)
+                    ).alias("block_abs")
+                )
+                .unique(subset=["day", "Canal", "time_15", "SubscriberID"])
+                .select(["day", "Canal", "block_abs", "SubscriberID"])
+            )
+
+            partes_lf.append(lf)
+
+        if not partes_lf:
+            return pl.DataFrame(
+                schema={
+                    "_fila": pl.UInt32,
+                    "usuarios_unicos": pl.Int64,
+                }
+            )
+
+        df_usuario_bloque = pl.concat(partes_lf, rechunk=False)
+
+        return (
+            df_usuario_bloque.join(
+                interval_blocks.lazy(),
+                on=["day", "Canal", "block_abs"],
+                how="inner",
+            )
+            .group_by("_fila")
+            .agg(pl.col("SubscriberID").n_unique().alias("usuarios_unicos"))
+            .sort("_fila")
+            .collect()
+        )
+
+
     return (
         STREAM_VERSION,
         stream_por_canal_desde_15m,
         usuarios_15min_por_canal_desde_parquet,
+        usuarios_unicos_por_programa_desde_parquet,
     )
 
 
@@ -1211,11 +1354,13 @@ def _(
     STREAM_VERSION,
     grid_playback,
     mo,
+    pl,
     res,
     stream_por_canal_desde_15m,
     usuarios_15min_por_canal_desde_parquet,
+    usuarios_unicos_por_programa_desde_parquet,
 ):
-    # Cálculo Stream: usuarios únicos por bloque de 15 min y canal
+    # Cálculo Stream: usuarios únicos por bloque de 15 min y canal, luego dedup program
     paths_stream = tuple((month, str(path)) for month, path in res["paths"])
     canal_senales_tup = tuple(
         sorted((canal, tuple(senales)) for canal, senales in CANAL_SENALES.items())
@@ -1249,6 +1394,31 @@ def _(
     df_stream_detalle, grid_stream = stream_por_canal_desde_15m(
         grid_playback,
         df_usuarios_15min,
+    )
+
+    df_stream_unicos = usuarios_unicos_por_programa_desde_parquet(
+        grid_stream,
+        [(month, Path(path_str)) for month, path_str in paths_stream],
+        CANAL_SENALES,
+        CO_ONLY,
+    )
+
+    grid_stream = (
+        grid_stream.with_row_index("_fila")
+        .join(df_stream_unicos, on="_fila", how="left")
+        .drop("_fila")
+        .with_columns(
+            pl.col("usuarios_unicos").fill_null(0).cast(pl.Int64).alias("Stream"),
+        )
+        .drop("usuarios_unicos")
+        .with_columns(
+            # Las vistas del lapso deben ser al menos el número de usuarios únicos
+            # que aparecieron en ese lapso. Esto corrige casos donde el reparto
+            # diario escalado queda por debajo de la evidencia cruda del programa.
+            pl.max_horizontal(pl.col("Play back"), pl.col("Stream"))
+            .cast(pl.Int64)
+            .alias("Play back")
+        )
     )
 
     grid_stream
@@ -1670,6 +1840,25 @@ def _(grid_report, mo, pl):
         | pl.col("Duracion_minutos").is_null()
     )
 
+    _df_report_validation = pl.DataFrame(
+        {
+            "validación": [
+                "filas totales",
+                "filas Stream > Play back",
+                "filas con Play back == Stream y Stream > 0",
+                "filas con campos principales nulos",
+            ],
+            "valor": [
+                grid_report.height,
+                grid_report.filter(pl.col("Stream") > pl.col("Play back")).height,
+                grid_report.filter(
+                    (pl.col("Play back") == pl.col("Stream")) & (pl.col("Stream") > 0)
+                ).height,
+                _df_report_nulls.height,
+            ],
+        }
+    )
+
     _df_report_sample = grid_report.select(
         "Fecha",
         "Canal",
@@ -1686,7 +1875,7 @@ def _(grid_report, mo, pl):
         "peso% peak",
         "Duracion_minutos",
         "% de consumo",
-    ).head(20)
+    ).head(50)
 
     mo.vstack(
         [
@@ -1696,8 +1885,8 @@ def _(grid_report, mo, pl):
                 f"{grid_report.filter(pl.col('Peak WSO') > 0).height:,} con Peak &gt; 0"
             ),
             df_report_summary,
+            _df_report_validation,
             _df_report_sample,
-            mo.md(f"**Filas con campos principales nulos:** {_df_report_nulls.height}"),
         ]
     )
 
