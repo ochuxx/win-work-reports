@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.1"
+__generated_with = "0.25.2"
 app = marimo.App(width="medium")
 
 
@@ -100,8 +100,8 @@ def _(dt):
 
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
-    DATE_REPORT_INI = dt.date(2026, 10, 1)
-    DATE_REPORT_END = dt.date(2026, 10, 18)
+    DATE_REPORT_INI = dt.date(2026, 10, 5)
+    DATE_REPORT_END = dt.date(2026, 10, 25)
     return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
@@ -1333,7 +1333,6 @@ def _(
         _periodo,
         mo.hstack([btn_comparacion, btn_apilada], gap=1),
     ])
-
     return
 
 
