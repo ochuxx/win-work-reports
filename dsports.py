@@ -27,8 +27,8 @@ def _(mo):
 
 @app.cell
 def _(pl):
-    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-09.parquet')
-    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-10.parquet')
+    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-10.parquet')
+    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-11.parquet')
     return df_oct, df_sep
 
 
@@ -100,8 +100,8 @@ def _(dt):
 
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
-    DATE_REPORT_INI = dt.date(2026, 10, 5)
-    DATE_REPORT_END = dt.date(2026, 10, 25)
+    DATE_REPORT_INI = dt.date(2026, 10, 25)
+    DATE_REPORT_END = dt.date(2026, 11, 2)
     return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
@@ -370,7 +370,7 @@ def _(mo):
 
 @app.cell
 def _():
-    SIGNALS = ['WIN AUDIO', 'WIN SPORTS', 'WIN+FUTBOL', 'DSPORTS', 'DSPORTS 2']
+    SIGNALS = ['WIN AUDIO', 'WIN SPORTS', 'WIN+FUTBOL', 'DSPORTS', 'DSPORTS 2', 'TYC']
     return (SIGNALS,)
 
 
@@ -812,8 +812,16 @@ def _(WINDOW_MINUTES, df_dates_filter, df_signals_day, pl):
     df_WIN_AUDIO = reescalar_concurrencia('WIN AUDIO', general_concurrency, df_signals_day)
     df_DSPORTS = reescalar_concurrencia('DSPORTS', general_concurrency, df_signals_day)
     df_DSPORTS_2 = reescalar_concurrencia('DSPORTS 2', general_concurrency, df_signals_day)
-    df_WIN_FUTBOL.head()
-    return df_DSPORTS, df_DSPORTS_2, df_WIN_AUDIO, df_WIN_FUTBOL, df_WIN_SPORTS
+    df_TYC = reescalar_concurrencia('TYC', general_concurrency, df_signals_day)
+    df_TYC.head()
+    return (
+        df_DSPORTS,
+        df_DSPORTS_2,
+        df_TYC,
+        df_WIN_AUDIO,
+        df_WIN_FUTBOL,
+        df_WIN_SPORTS,
+    )
 
 
 @app.cell(hide_code=True)
@@ -946,6 +954,7 @@ def _(mo):
 def _(
     df_DSPORTS,
     df_DSPORTS_2,
+    df_TYC,
     df_WIN_AUDIO,
     df_WIN_FUTBOL,
     df_WIN_SPORTS,
@@ -961,6 +970,7 @@ def _(
         ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
         ('DSPORTS', df_DSPORTS, '#0ba4e5'),
         ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
+        ('TYC', df_TYC, '#86c186'),
     ]
 
     _filas_senales = []
@@ -1083,6 +1093,7 @@ def _(dt, pl, plt):
 def _(
     df_DSPORTS,
     df_DSPORTS_2,
+    df_TYC,
     df_WIN_AUDIO,
     df_WIN_FUTBOL,
     df_WIN_SPORTS,
@@ -1094,6 +1105,7 @@ def _(
         ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
         ('DSPORTS', df_DSPORTS, '#0ba4e5'),
         ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
+        ('TYC', df_TYC, '#86c186'),
     ]
 
     plot_concurrencia_multi_senal(_series_senales_all)
@@ -1119,6 +1131,7 @@ def _(mo):
 def _(
     df_DSPORTS,
     df_DSPORTS_2,
+    df_TYC,
     df_WIN_AUDIO,
     df_WIN_FUTBOL,
     df_WIN_SPORTS,
@@ -1137,6 +1150,7 @@ def _(
         ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
         ('DSPORTS', df_DSPORTS, '#0ba4e5'),
         ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
+        ('TYC', df_TYC, '#86c186'),
     ]
 
 
