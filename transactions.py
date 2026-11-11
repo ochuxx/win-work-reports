@@ -230,6 +230,43 @@ def _(df_clean_t, pd):
     _df_purchases.info()
 
     df_t_full = _df_purchases[(_filter_purchases) & (_filter_successful)].copy()
+
+    # Evitar posibles purchasepayment_transaction_id duplicados con transaction true
+    # Blindaje: si un purchasepayment_transaction_id se repite (count >= _min_duplicate_count),
+    # se conserva ÚNICAMENTE el registro más grande según purchasepayment_date_created y se
+    # borran los demás. Los registros sin transaction id (NA / vacío) no se tocan,
+    # porque no identifican un pago real.
+    _min_duplicate_count = 2
+
+    _txid = df_t_full['purchasepayment_transaction_id']
+    _has_txid = _txid.notna() & (_txid.astype(str).str.strip().str.lower() != 'none') & (_txid.astype(str).str.strip() != '')
+    _txid_counts = _txid[_has_txid].value_counts()
+    _duplicated_txids = _txid_counts[_txid_counts >= _min_duplicate_count].index
+
+    _mask_duplicated = _has_txid & df_t_full['purchasepayment_transaction_id'].isin(_duplicated_txids)
+
+    # Ordenamos de menor a mayor fecha (los NaT van primero para no ganar nunca)
+    # y del grupo conservamos la última fila = la fecha más grande.
+    _df_duplicated = df_t_full[_mask_duplicated].sort_values(
+        'purchasepayment_date_created', ascending=True, na_position='first'
+    )
+    _index_to_keep = _df_duplicated.groupby('purchasepayment_transaction_id', sort=False).tail(1).index
+
+    _rows_before = len(df_t_full)
+    _txids_affected = int(len(_duplicated_txids))
+    _rows_removed = int(len(_df_duplicated) - len(_index_to_keep))
+
+    df_t_full = pd.concat(
+        [df_t_full[~_mask_duplicated], _df_duplicated.loc[_index_to_keep]]
+    ).sort_values('purchasepayment_date_created', ascending=True).reset_index(drop=True)
+
+    _dups_remaining = int(df_t_full['purchasepayment_transaction_id'][df_t_full['purchasepayment_transaction_id'].isin(_duplicated_txids)].duplicated().sum())
+
+    print(f"Transaction ids con count >= {_min_duplicate_count}: {_txids_affected}")
+    print(f"Filas eliminadas por duplicado: {_rows_removed}")
+    print(f"Filas antes: {_rows_before} -> Filas después: {len(df_t_full)}")
+    print(f"Duplicados restantes en purchasepayment_transaction_id: {_dups_remaining}")
+
     print(_df_purchases['purchasepayment_date_created'].min())
     print(_df_purchases['purchasepayment_date_created'].max())
     return (df_t_full,)
@@ -249,6 +286,12 @@ def _(df_t_full, display):
     _df_t_full = _df_t_full.reset_index(drop=True).reset_index()
 
     display(_df_t_full)
+    display(_df_t_full['purchasepayment_transaction_id'].value_counts())
+    return
+
+
+@app.cell
+def _():
     return
 
 
