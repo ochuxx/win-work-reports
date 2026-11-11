@@ -115,6 +115,7 @@ def _(df_ct):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    ## Full final table
     Transforming information
     """)
     return
@@ -150,6 +151,7 @@ def _(df_adjust_t, pd):
     # Cambiar nombre de valores
     df_clean_t.loc[df_clean_t['customerpurchase_gateway'] == 'affiliates', 'customerpurchase_gateway'] = 'platform'
     df_clean_t.loc[df_clean_t['customerpurchase_gateway'] == 'freepass', 'customerpurchase_gateway'] = 'coupon'
+    df_clean_t.loc[df_clean_t['purchasepayment_payment_method'] == 'PARTNER_ATTESTATION', 'purchasepayment_payment_method'] = ''
 
     # Convertir fechas str a datetime
     df_clean_t["customerpurchase_date_created"] = df_clean_t["customerpurchase_date_created"].str[:-5]
@@ -161,6 +163,14 @@ def _(df_adjust_t, pd):
 
     df_clean_t.head(50)
     return (df_clean_t,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Metrics about full table
+    """)
+    return
 
 
 @app.cell
@@ -210,11 +220,11 @@ def _(df_clean_t, pd):
 
     _filter_purchases = _df_purchases['customerpurchase_type'].isin(['SUBSCRIPTION', 'SUBSCRIPTION_RENEWED', 'SUBSCRIPTION_TRIAL', 'SUBSCRIPTION_ADDON', 'SUBSCRIPTION_ADDON_REFUNDED', 'SUBSCRIPTION_REFUNDED'])
 
-    _filter_successful = (_df_purchases['purchasepayment_status'] == 'SUCCESSFUL') | ((_df_purchases['customerpurchase_type'].isin(['SUBSCRIPTION_REFUNDED', 'SUBSCRIPTION_ADDON_REFUNDED'])) & (_df_purchases['purchasepayment_status'] == 'REFUNDED'))
+    _filter_successful = (_df_purchases['purchasepayment_status'].isin(['SUCCESSFUL', 'SUCCESS'])) | ((_df_purchases['customerpurchase_type'].isin(['SUBSCRIPTION_REFUNDED', 'SUBSCRIPTION_ADDON_REFUNDED'])) & (_df_purchases['purchasepayment_status'] == 'REFUNDED'))
 
     _filter_date = _df_purchases['purchasepayment_date_created'].between('2026-11-08 23:59:59', '2026-11-09 23:59:59', inclusive='right')
 
-    _filter_gateway = ~_df_purchases['customerpurchase_ga teway'].isin(['coupon', 'access'])
+    _filter_gateway = ~_df_purchases['customerpurchase_gateway'].isin(['coupon', 'access'])
 
     _df_purchases = _df_purchases[(_filter_purchases) & (_filter_successful) & (_filter_date) & (_filter_gateway)]
     _df_purchases.info()
