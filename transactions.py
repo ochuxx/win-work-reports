@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.1"
+__generated_with = "0.25.2"
 app = marimo.App(width="medium")
 
 
@@ -13,9 +13,17 @@ def _():
     return display, mo, pd
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Reading information
+    """)
+    return
+
+
 @app.cell
 def _(display, pd):
-    df_t = pd.read_csv('./win-work-reports/transactions_data/11-12oct.csv')
+    df_t = pd.read_csv('./win-work-reports/transactions_data/9-nov-data.csv')
     df_c = pd.read_csv('./win-work-reports/transactions_data/userInformation.csv')
     df_t['customer_correlative_id'] = ""
     df_t['purchasepayment_product_type'] = ""
@@ -32,6 +40,7 @@ def _(display, pd):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    # Cleaning information
     Merging & cleaning information
     """)
     return
@@ -150,7 +159,7 @@ def _(df_adjust_t, pd):
     df_clean_t["purchasepayment_date_created"] = pd.to_datetime(df_clean_t["purchasepayment_date_created"])
     df_clean_t["customerpurchase_valid_until"] = pd.to_datetime(df_clean_t["customerpurchase_valid_until"])
 
-    df_clean_t.head(20)
+    df_clean_t.head(50)
     return (df_clean_t,)
 
 
@@ -166,10 +175,70 @@ def _(df_clean_t, display):
     display(df_clean_t[df_clean_t['customerpurchase_gateway'] == 'access'])
 
     display(df_clean_t[df_clean_t['customer_id'] == '67b106de199c1a00081096d4'])
+    display(df_clean_t['customerpurchase_type'].value_counts())
+    display(df_clean_t['purchasepayment_status'].value_counts())
 
     print(df_clean_t.info())
     print(df_clean_t['purchasepayment_date_created'].min())
     print(df_clean_t['purchasepayment_date_created'].max())
+    return
+
+
+@app.cell
+def _(df_clean_t, display):
+    display(df_clean_t[~(df_clean_t['coupon_code'].isna())])
+    display(df_clean_t['customerpurchase_gateway'].value_counts())
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Init filters
+
+    Filtrar únicamente suscripciones compradas/creadas y otros
+    """)
+    return
+
+
+@app.cell
+def _(df_clean_t, pd):
+    _df_purchases = df_clean_t.copy()
+    _df_purchases['customerpurchase_date_created'] = _df_purchases['customerpurchase_date_created'] - pd.Timedelta(hours=5)
+    _df_purchases['purchasepayment_date_created'] = _df_purchases['purchasepayment_date_created'] - pd.Timedelta(hours=5)
+    _df_purchases['customerpurchase_valid_until'] = _df_purchases['customerpurchase_valid_until'] - pd.Timedelta(hours=5)
+
+    _filter_purchases = _df_purchases['customerpurchase_type'].isin(['SUBSCRIPTION', 'SUBSCRIPTION_RENEWED', 'SUBSCRIPTION_TRIAL', 'SUBSCRIPTION_ADDON', 'SUBSCRIPTION_ADDON_REFUNDED', 'SUBSCRIPTION_REFUNDED'])
+
+    _filter_successful = (_df_purchases['purchasepayment_status'] == 'SUCCESSFUL') | ((_df_purchases['customerpurchase_type'].isin(['SUBSCRIPTION_REFUNDED', 'SUBSCRIPTION_ADDON_REFUNDED'])) & (_df_purchases['purchasepayment_status'] == 'REFUNDED'))
+
+    _filter_date = _df_purchases['purchasepayment_date_created'].between('2026-11-08 23:59:59', '2026-11-09 23:59:59', inclusive='right')
+
+    _filter_gateway = ~_df_purchases['customerpurchase_ga teway'].isin(['coupon', 'access'])
+
+    _df_purchases = _df_purchases[(_filter_purchases) & (_filter_successful) & (_filter_date) & (_filter_gateway)]
+    _df_purchases.info()
+
+    df_t_full = _df_purchases[(_filter_purchases) & (_filter_successful)].copy()
+    print(_df_purchases['purchasepayment_date_created'].min())
+    print(_df_purchases['purchasepayment_date_created'].max())
+    return (df_t_full,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Tabla final de comparación
+    """)
+    return
+
+
+@app.cell
+def _(df_t_full, display):
+    _df_t_full = df_t_full.sort_values(by='purchasepayment_date_created', ascending=True)
+    _df_t_full = _df_t_full.reset_index(drop=True).reset_index()
+
+    display(_df_t_full)
     return
 
 

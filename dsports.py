@@ -27,8 +27,8 @@ def _(mo):
 
 @app.cell
 def _(pl):
-    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-10.parquet')
-    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-11.parquet')
+    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-09.parquet')
+    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-10.parquet')
     return df_oct, df_sep
 
 
@@ -100,8 +100,8 @@ def _(dt):
 
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
-    DATE_REPORT_INI = dt.date(2026, 10, 25)
-    DATE_REPORT_END = dt.date(2026, 11, 2)
+    DATE_REPORT_INI = dt.date(2026, 9, 1)
+    DATE_REPORT_END = dt.date(2026, 10, 31)
     return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
@@ -361,7 +361,7 @@ def _(df, display, total_views_per_day, total_views_per_day_series):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### Reescalado de visualizaciones
+    ### Reescalado de visualizaciones y descarga de tabla
 
     Filtrar por fechas específicas; **solo señales en los programas** y porcentaje de equivalencia para escalarlo.
     """)
