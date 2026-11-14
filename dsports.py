@@ -27,8 +27,8 @@ def _(mo):
 
 @app.cell
 def _(pl):
-    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-09.parquet')
-    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-10.parquet')
+    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-10.parquet')
+    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-11.parquet')
     return df_oct, df_sep
 
 
@@ -100,8 +100,8 @@ def _(dt):
 
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
-    DATE_REPORT_INI = dt.date(2026, 9, 1)
-    DATE_REPORT_END = dt.date(2026, 10, 31)
+    DATE_REPORT_INI = dt.date(2026, 11, 14)
+    DATE_REPORT_END = dt.date(2026, 11, 14)
     return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
 
 
@@ -370,8 +370,35 @@ def _(mo):
 
 @app.cell
 def _():
-    SIGNALS = ['WIN AUDIO', 'WIN SPORTS', 'WIN+FUTBOL', 'DSPORTS', 'DSPORTS 2', 'TYC']
-    return (SIGNALS,)
+    # Señales del reporte: canales propios + señales WIN PLAY EVENTOS (1, 3, 4, 5, 6, 9).
+    WIN_PLAY_EVENTOS_IDS = [1, 3, 4, 5, 6, 9]
+    SIGNALS = [
+        'WIN AUDIO',
+        'WIN SPORTS',
+        'WIN+FUTBOL',
+        'DSPORTS',
+        'DSPORTS 2',
+        'TYC',
+    ] + [f'WIN PLAY EVENTOS {n}' for n in WIN_PLAY_EVENTOS_IDS]
+    return SIGNALS, WIN_PLAY_EVENTOS_IDS
+
+
+@app.cell
+def _(SIGNALS, df, pl):
+    # Verificación: eventos reales por señal del reporte en la base cruda.
+    # Permite confirmar que los nombres de `SIGNALS` coinciden con el campo `Title`.
+    _chk_senales_base = (
+        df.filter(pl.col('Title').is_in(SIGNALS))
+        .group_by('Title')
+        .agg(
+            pl.len().alias('Eventos'),
+            pl.col('Date').str.to_datetime(strict=False).dt.date().min().alias('Desde'),
+            pl.col('Date').str.to_datetime(strict=False).dt.date().max().alias('Hasta'),
+        )
+        .sort(['Eventos', 'Title'], descending=True)
+    )
+    _chk_senales_base
+    return
 
 
 @app.cell
@@ -696,7 +723,13 @@ def _(mo):
 
 
 @app.cell
-def _(WINDOW_MINUTES, df_dates_filter, df_signals_day, pl):
+def _(
+    WINDOW_MINUTES,
+    WIN_PLAY_EVENTOS_IDS,
+    df_dates_filter,
+    df_signals_day,
+    pl,
+):
     def _serie_to_utc(frame, col):
         dtype = frame.schema.get(col)
         if dtype is None or not isinstance(dtype, pl.Datetime):
@@ -813,15 +846,81 @@ def _(WINDOW_MINUTES, df_dates_filter, df_signals_day, pl):
     df_DSPORTS = reescalar_concurrencia('DSPORTS', general_concurrency, df_signals_day)
     df_DSPORTS_2 = reescalar_concurrencia('DSPORTS 2', general_concurrency, df_signals_day)
     df_TYC = reescalar_concurrencia('TYC', general_concurrency, df_signals_day)
-    df_TYC.head()
+
+    # Señales WIN PLAY EVENTOS: una serie reescalada por cada id de la lista.
+    df_WIN_PLAY_EVENTOS_1 = reescalar_concurrencia(
+        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[0]}', general_concurrency, df_signals_day
+    )
+    df_WIN_PLAY_EVENTOS_3 = reescalar_concurrencia(
+        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[1]}', general_concurrency, df_signals_day
+    )
+    df_WIN_PLAY_EVENTOS_4 = reescalar_concurrencia(
+        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[2]}', general_concurrency, df_signals_day
+    )
+    df_WIN_PLAY_EVENTOS_5 = reescalar_concurrencia(
+        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[3]}', general_concurrency, df_signals_day
+    )
+    df_WIN_PLAY_EVENTOS_6 = reescalar_concurrencia(
+        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[4]}', general_concurrency, df_signals_day
+    )
+    df_WIN_PLAY_EVENTOS_9 = reescalar_concurrencia(
+        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[5]}', general_concurrency, df_signals_day
+    )
+    (df_WIN_PLAY_EVENTOS_1.height, int(df_WIN_PLAY_EVENTOS_1['Concurrencia'].max() or 0))
     return (
         df_DSPORTS,
         df_DSPORTS_2,
         df_TYC,
         df_WIN_AUDIO,
         df_WIN_FUTBOL,
+        df_WIN_PLAY_EVENTOS_1,
+        df_WIN_PLAY_EVENTOS_3,
+        df_WIN_PLAY_EVENTOS_4,
+        df_WIN_PLAY_EVENTOS_5,
+        df_WIN_PLAY_EVENTOS_6,
+        df_WIN_PLAY_EVENTOS_9,
         df_WIN_SPORTS,
     )
+
+
+@app.cell
+def _(
+    df_DSPORTS,
+    df_DSPORTS_2,
+    df_TYC,
+    df_WIN_AUDIO,
+    df_WIN_FUTBOL,
+    df_WIN_PLAY_EVENTOS_1,
+    df_WIN_PLAY_EVENTOS_3,
+    df_WIN_PLAY_EVENTOS_4,
+    df_WIN_PLAY_EVENTOS_5,
+    df_WIN_PLAY_EVENTOS_6,
+    df_WIN_PLAY_EVENTOS_9,
+    df_WIN_SPORTS,
+):
+    # Catálogo único de señales: (nombre, serie de concurrencia reescalada, color).
+    # Fuente de verdad para el Gráfico 1, el Gráfico 2 y la exportación a PNG.
+    # Las señales WIN PLAY EVENTOS reutilizan el mismo reescalado por porcentaje diario.
+    SENALES_SERIES = [
+        ('WIN+FUTBOL', df_WIN_FUTBOL, '#ff5500'),
+        ('WIN SPORTS', df_WIN_SPORTS, '#d839ff'),
+        ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
+        ('DSPORTS', df_DSPORTS, '#0ba4e5'),
+        ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
+        ('TYC', df_TYC, '#86c186'),
+        ('WIN PLAY EVENTOS 1', df_WIN_PLAY_EVENTOS_1, '#f9a825'),
+        ('WIN PLAY EVENTOS 3', df_WIN_PLAY_EVENTOS_3, '#33691e'),
+        ('WIN PLAY EVENTOS 4', df_WIN_PLAY_EVENTOS_4, '#ad1457'),
+        ('WIN PLAY EVENTOS 5', df_WIN_PLAY_EVENTOS_5, '#4527a0'),
+        ('WIN PLAY EVENTOS 6', df_WIN_PLAY_EVENTOS_6, '#6d4c41'),
+        ('WIN PLAY EVENTOS 9', df_WIN_PLAY_EVENTOS_9, '#37474f'),
+    ]
+
+    # Nombres y colores listos para iteraciones ligeras (sin los DataFrames).
+    NOMBRES_SENALES = [nombre for nombre, _, _ in SENALES_SERIES]
+    COLORES_SENALES = {nombre: color for nombre, _, color in SENALES_SERIES}
+    len(SENALES_SERIES)
+    return (SENALES_SERIES,)
 
 
 @app.cell(hide_code=True)
@@ -952,29 +1051,15 @@ def _(mo):
 
 @app.cell(expand_output=True)
 def _(
-    df_DSPORTS,
-    df_DSPORTS_2,
-    df_TYC,
-    df_WIN_AUDIO,
-    df_WIN_FUTBOL,
-    df_WIN_SPORTS,
+    SENALES_SERIES,
     df_kpi_por_senal,
     kpi_card_senal,
     mo,
     pl,
     plot_concurrencia_senal,
 ):
-    _SENALES_PLOTS = [
-        ('WIN+FUTBOL', df_WIN_FUTBOL, '#ff5500'),
-        ('WIN SPORTS', df_WIN_SPORTS, '#d839ff'),
-        ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
-        ('DSPORTS', df_DSPORTS, '#0ba4e5'),
-        ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
-        ('TYC', df_TYC, '#86c186'),
-    ]
-
     _filas_senales = []
-    for _signal, _senal_df, _color in _SENALES_PLOTS:
+    for _signal, _senal_df, _color in SENALES_SERIES:
         _fila_kpi = df_kpi_por_senal.filter(pl.col('Title') == _signal)
         _total = int(_fila_kpi['Total vistas'][0]) if _fila_kpi.height else 0
         _fmin = _fila_kpi['Fecha min'][0] if _fila_kpi.height else None
@@ -1079,9 +1164,26 @@ def _(dt, pl, plt):
         ax.set_xlabel(xlabel, fontweight='bold')
         ax.set_ylabel('Reproducciones')
         ax.grid(True, alpha=0.2, axis='y')
-        ax.legend(loc='upper left', frameon=False, ncol=2, fontsize=9)
+
+        # Con muchas señales la leyenda dentro del eje tapa las áreas: se saca a la
+        # derecha y se reserva espacio para ella.
+        leyenda_fuera = len(labels) > 8
+        if leyenda_fuera:
+            ax.legend(
+                loc='center left',
+                bbox_to_anchor=(1.01, 0.5),
+                frameon=False,
+                ncol=1,
+                fontsize=8,
+                title='Señales',
+            )
+        else:
+            ax.legend(loc='upper left', frameon=False, ncol=2, fontsize=9)
+
         fig.autofmt_xdate()
         fig.tight_layout()
+        if leyenda_fuera:
+            fig.subplots_adjust(right=0.76)
         for spine in ax.spines.values():
             spine.set_visible(False)
         return fig
@@ -1090,25 +1192,8 @@ def _(dt, pl, plt):
 
 
 @app.cell
-def _(
-    df_DSPORTS,
-    df_DSPORTS_2,
-    df_TYC,
-    df_WIN_AUDIO,
-    df_WIN_FUTBOL,
-    df_WIN_SPORTS,
-    plot_concurrencia_multi_senal,
-):
-    _series_senales_all = [
-        ('WIN+FUTBOL', df_WIN_FUTBOL, '#ff5500'),
-        ('WIN SPORTS', df_WIN_SPORTS, '#d839ff'),
-        ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
-        ('DSPORTS', df_DSPORTS, '#0ba4e5'),
-        ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
-        ('TYC', df_TYC, '#86c186'),
-    ]
-
-    plot_concurrencia_multi_senal(_series_senales_all)
+def _(SENALES_SERIES, plot_concurrencia_multi_senal):
+    plot_concurrencia_multi_senal(SENALES_SERIES)
     return
 
 
@@ -1119,7 +1204,7 @@ def _(mo):
 
     Dos botones para bajar un PNG (200 dpi, fondo blanco) de cada gráfico del reporte:
 
-    - **Comparación señales**: el Gráfico 1 tal cual, 5 filas con la concurrencia reescalada de cada señal junto a su tarjeta KPI de vistas totales.
+    - **Comparación señales**: el Gráfico 1 tal cual, una fila por señal (ahora 12, incluidas las WIN PLAY EVENTOS) con la concurrencia reescalada junto a su tarjeta KPI de vistas totales.
     - **Concurrencia apilada**: el Gráfico 2, concurrencia total segmentada por señal.
 
     Los PNG se reconstruyen con los mismos datos del notebook, así que se actualizan al re-ejecutarlo.
@@ -1128,30 +1213,10 @@ def _(mo):
 
 
 @app.cell
-def _(
-    df_DSPORTS,
-    df_DSPORTS_2,
-    df_TYC,
-    df_WIN_AUDIO,
-    df_WIN_FUTBOL,
-    df_WIN_SPORTS,
-    df_kpi_por_senal,
-    pl,
-    plt,
-):
+def _(SENALES_SERIES, df_kpi_por_senal, pl, plt):
     import io
     from matplotlib.patches import FancyBboxPatch, Rectangle
     from matplotlib.colors import to_rgba
-
-    # Series de concurrencia por señal con su color (los mismos que en los gráficos).
-    SENALES_SERIES = [
-        ('WIN+FUTBOL', df_WIN_FUTBOL, '#ff5500'),
-        ('WIN SPORTS', df_WIN_SPORTS, '#d839ff'),
-        ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
-        ('DSPORTS', df_DSPORTS, '#0ba4e5'),
-        ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
-        ('TYC', df_TYC, '#86c186'),
-    ]
 
 
     def render_senal_on_ax(ax, senal_df, title, color):
@@ -1196,7 +1261,7 @@ def _(
 
 
     def build_figura_comparacion():
-        """Reconstruye el gráfico 1 (5 filas: concurrencia + KPI) en una sola figura."""
+        """Reconstruye el gráfico 1 (una fila por señal: concurrencia + KPI)."""
         filas = len(SENALES_SERIES)
         fig, axes = plt.subplots(
             filas, 2,
@@ -1300,8 +1365,7 @@ def _(
             plt.close(fig)
         return buffer.getvalue()
 
-
-    return SENALES_SERIES, build_figura_comparacion, figura_a_png_bytes
+    return build_figura_comparacion, figura_a_png_bytes
 
 
 @app.cell
@@ -1320,8 +1384,8 @@ def _(
     _sufijo = f'{DATE_REPORT_INI:%Y%m%d}-{DATE_REPORT_END:%Y%m%d}'
 
     # Comparación señales: mismo render que `mo.vstack(_filas_senales)`
-    # (5 filas de concurrencia + su tarjeta KPI). Se pasa el *builder* para que la
-    # figura se cree dentro del tema claro de exportación.
+    # (una fila por señal de `SENALES_SERIES`: concurrencia + su tarjeta KPI).
+    # Se pasa el *builder* para que la figura se cree dentro del tema claro de exportación.
     _img_comparacion = figura_a_png_bytes(build_figura_comparacion)
 
     # Concurrencia apilada: mismo render que el Gráfico 2.
