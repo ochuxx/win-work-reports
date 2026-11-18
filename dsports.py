@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.2"
+__generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
 
@@ -27,8 +27,8 @@ def _(mo):
 
 @app.cell
 def _(pl):
-    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-10.parquet')
-    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-11.parquet')
+    df_sep = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-05.parquet')
+    df_oct = pl.read_parquet('./win-work-reports/streaming_data/LIVE_2026-06.parquet')
     return df_oct, df_sep
 
 
@@ -98,11 +98,80 @@ def _(dt):
       'deviceDescription',
     ]
 
+    # Señales incluidas en la comparación y el reescalado.
+    # Edita esta lista para añadir o quitar señales del reporte.
+    SIGNALS = [
+        'WIN AUDIO',
+        'WIN SPORTS',
+        'WIN+FUTBOL',
+        # 'DSPORTS',
+        # 'DSPORTS 2',
+        # 'TYC',
+        # 'WIN PLAY EVENTOS 1',
+        #'WIN PLAY EVENTOS 2',
+        # 'WIN PLAY EVENTOS 3',
+        'WIN PLAY EVENTOS 4',
+        'WIN PLAY EVENTOS 5',
+        'WIN PLAY EVENTOS 6',
+        'WIN PLAY EVENTOS 7',
+        # 'WIN PLAY EVENTOS 8',
+        #'WIN PLAY EVENTOS 9',
+    ]
+
     # Constantes -> Cambios manuales
     # Afecta también a la concurrencia de reproducción
-    DATE_REPORT_INI = dt.date(2026, 11, 14)
-    DATE_REPORT_END = dt.date(2026, 11, 14)
-    return DATE_REPORT_END, DATE_REPORT_INI, DEVICE_UNIQUE_COLS
+    DATE_REPORT_INI = dt.date(2026, 5, 3)
+    DATE_REPORT_END = dt.date(2026, 5, 3)
+
+    # Activar para restringir el reporte a una franja horaria en cada día del rango.
+    IS_HOUR = True
+    TIME_REPORT_MIN = dt.time(12, 0)     # Hora militar HH:MM
+    TIME_REPORT_MAX = dt.time(17, 45, 0) # Hora militar HH:MM:SS
+    return (
+        DATE_REPORT_END,
+        DATE_REPORT_INI,
+        DEVICE_UNIQUE_COLS,
+        IS_HOUR,
+        SIGNALS,
+        TIME_REPORT_MAX,
+        TIME_REPORT_MIN,
+    )
+
+
+@app.cell
+def _(
+    DATE_REPORT_END,
+    DATE_REPORT_INI,
+    IS_HOUR,
+    TIME_REPORT_MAX,
+    TIME_REPORT_MIN,
+    df,
+    pl,
+):
+    # Base común del reporte: fechas y, opcionalmente, franja horaria diaria.
+    _df_con_fecha_reporte = df.with_columns(
+        pl.col('Date').str.to_datetime(strict=False).alias('_report_datetime')
+    )
+    df_report_filter = (
+        _df_con_fecha_reporte
+        .filter(
+            pl.col('_report_datetime').dt.date().is_between(
+                DATE_REPORT_INI,
+                DATE_REPORT_END,
+                closed='both',
+            )
+        )
+    )
+    if IS_HOUR:
+        df_report_filter = df_report_filter.filter(
+            pl.col('_report_datetime').dt.time().is_between(
+                TIME_REPORT_MIN,
+                TIME_REPORT_MAX,
+                closed='both',
+            )
+        )
+    df_report_filter = df_report_filter.drop('_report_datetime')
+    return (df_report_filter,)
 
 
 @app.cell
@@ -134,7 +203,6 @@ def _(pl):
           pl.col('deviceDescription').fill_null('UnknownDevice'),
         )
 
-        # ===== START DEPURING UNIQUES DEVICES =====
         df = df.with_columns(
           pl.concat_str(
             [
@@ -147,26 +215,16 @@ def _(pl):
           ).alias('id_unique_visual_by_user')
         )
 
-        # Normaliza fecha para calcular ventanas de 24 horas por visualizacion.
         if df.schema['Date'] == pl.String:
-          df = df.with_columns(
-            pl.col('Date').str.to_datetime(strict=False)
-          )
+          df = df.with_columns(pl.col('Date').str.to_datetime(strict=False))
         else:
-          df = df.with_columns(
-            pl.col('Date').cast(pl.Datetime, strict=False)
-          )
+          df = df.with_columns(pl.col('Date').cast(pl.Datetime, strict=False))
         df = df.filter(pl.col('Date').is_not_null())
         df = df.sort(['id_unique_visual_by_user', 'Date'])
 
-        # Si el mismo id_unique_visual_by_user reaparece despues de 24h,
-        # se considera una nueva visualizacion.
         time_diff = pl.col('Date').diff().over('id_unique_visual_by_user')
         is_new_visualization = time_diff.is_null() | (time_diff > pl.duration(hours=hours_diff))
-
-        df = df.with_columns(
-          is_new_visualization.alias('is_new_visualization')
-        )
+        df = df.with_columns(is_new_visualization.alias('is_new_visualization'))
         df = df.with_columns(
           pl.col('is_new_visualization')
           .cast(pl.Int64)
@@ -184,23 +242,12 @@ def _(pl):
           ).alias('visualization_id_24h')
         )
 
-        # Registros unicos por visualizacion (ignora eventos repetidos como pause/resume).
         df_unique = df.unique(subset=['visualization_id_24h'], keep='first')
         df_unique = df_unique.drop(['is_new_visualization', 'visualization_session', 'visualization_id_24h'])
-
-        # ===== START IDENTIFYING HISTORICAL FIRST STREAM =====
-        # 1. Ordenar por usuario y fecha para garantizar el orden cronológico
         df_unique = df_unique.sort(['SubscriberID', 'Date'])
-
-        # 2. Identificar la primera aparición de cada usuario
         df_unique = df_unique.with_columns(
-          pl.col('SubscriberID')
-          .cum_count()
-          .over('SubscriberID')
-          .alias('_user_rank')
+          pl.col('SubscriberID').cum_count().over('SubscriberID').alias('_user_rank')
         )
-
-        # 3. Inicializar la columna como nula y asignar '--1' SOLO a los primeros streams
         df_unique = df_unique.with_columns(
           pl.when(pl.col('_user_rank') == 1)
           .then(
@@ -215,13 +262,10 @@ def _(pl):
           .otherwise(None)
           .alias('UserUniqueID')
         ).drop('_user_rank')
-        # ===== END IDENTIFYING HISTORICAL FIRST STREAM =====
-
-        # ===== END DEPURING UNIQUES DEVICES =====
 
       except Exception as e:
         print(f"Error al procesar la información: {e}")
-        return _empty_pl_df(expected_base_cols + ['id_unique_visual_by_user', 'UserUniqueID'])  # Retorna estructura esperada
+        return _empty_pl_df(expected_base_cols + ['id_unique_visual_by_user', 'UserUniqueID'])
 
       return df_unique
 
@@ -349,9 +393,14 @@ def _(mo):
 
 
 @app.cell
-def _(df, display, total_views_per_day, total_views_per_day_series):
-    df_views = total_views_per_day(events_df=df, hours_diff=20 /60)
-    df_views_title = total_views_per_day_series(events_df=df, hours_diff=20 /60)
+def _(
+    df_report_filter,
+    display,
+    total_views_per_day,
+    total_views_per_day_series,
+):
+    df_views = total_views_per_day(events_df=df_report_filter, hours_diff=20 /60)
+    df_views_title = total_views_per_day_series(events_df=df_report_filter, hours_diff=20 /60)
     display(df_views.head())
     print('-'*25)
     display(df_views_title.head())
@@ -370,17 +419,8 @@ def _(mo):
 
 @app.cell
 def _():
-    # Señales del reporte: canales propios + señales WIN PLAY EVENTOS (1, 3, 4, 5, 6, 9).
-    WIN_PLAY_EVENTOS_IDS = [1, 3, 4, 5, 6, 9]
-    SIGNALS = [
-        'WIN AUDIO',
-        'WIN SPORTS',
-        'WIN+FUTBOL',
-        'DSPORTS',
-        'DSPORTS 2',
-        'TYC',
-    ] + [f'WIN PLAY EVENTOS {n}' for n in WIN_PLAY_EVENTOS_IDS]
-    return SIGNALS, WIN_PLAY_EVENTOS_IDS
+    # La lista SIGNALS se configura junto a DEVICE_UNIQUE_COLS al inicio del notebook.
+    return
 
 
 @app.cell
@@ -505,7 +545,7 @@ def _():
 
 
 @app.cell
-def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
+def _(WINDOW_MINUTES, df_report_filter, pl, plt):
     def _to_utc_datetime(df: pl.DataFrame, col: str) -> pl.DataFrame:
       dtype = df.schema.get(col)
       if dtype is None or not isinstance(dtype, pl.Datetime):
@@ -545,15 +585,7 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
       figsize: tuple = (12, 4),
       show: bool = True,
     ):
-      """Grafica concurrencia de streams usando ventana rodante (matplotlib).
-
-      Un stream (SubscriberID + Title + deviceDescription) se considera activo en
-      el instante t si tuvo cualquier evento en [t - window_minutes, t].
-
-      Metodologia alineada con el proveedor (ventana de 25-26 min).
-
-      Devuelve (fig, ax), o (None, None) si no hay datos.
-      """
+      """Grafica concurrencia de streams usando ventana rodante."""
       if events_df is None or events_df.is_empty():
         print('No hay datos de eventos para mostrar la concurrencia.')
         return None, None
@@ -565,7 +597,6 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
         return None, None
 
       events_df = _to_utc_datetime(events_df, 'Date')
-
       if start_datetime is None:
         start_datetime = events_df.select(pl.col('Date').min()).item()
       if end_datetime is None:
@@ -573,21 +604,14 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
 
       start_utc = _coerce_to_utc(start_datetime)
       end_utc = _coerce_to_utc(end_datetime)
-
-      # Para que el conteo en el borde izquierdo sea correcto, necesitamos
-      # eventos de hasta `window_minutes` antes de start_datetime.
       extended_start_utc = start_utc - pl.duration(minutes=window_minutes)
       events_in_range = events_df.filter(
         (pl.col('Date') >= extended_start_utc) & (pl.col('Date') <= end_utc)
       )
-
       if events_in_range.is_empty():
         print('No hay eventos en el rango seleccionado.')
         return None, None
 
-      # 1) Pares unicos (minuto, stream). Un "stream" se identifica por la triada
-      #    (SubscriberID, Title, deviceDescription). Si hay multiples eventos del
-      #    mismo stream en el mismo minuto, solo cuentan una vez.
       unique_pairs = (
         events_in_range
         .with_columns(pl.col('Date').dt.truncate('1m').alias('_minute'))
@@ -597,16 +621,10 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
         ])
         .unique()
       )
-
       if unique_pairs.is_empty():
         print('No hay eventos validos para calcular la concurrencia.')
         return None, None
 
-      # 2) Cuenta las ventanas activas sin expandir cada par a N x 25 filas.
-      #    Al desplazar cada evento al final de su ventana, un grupo dinamico
-      #    [t, t + window) equivale a contar eventos en [t - window + 1, t].
-      #    Esto mantiene la semantica anterior sin el cross join que disparaba el
-      #    consumo de memoria para datasets grandes.
       active_per_minute = (
         unique_pairs
         .with_columns(
@@ -626,13 +644,10 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
         .filter((pl.col('ts') >= start_utc) & (pl.col('ts') <= end_utc))
         .sort('ts')
       )
-
       if active_per_minute.is_empty():
         print('No hay minutos con streams activos en el rango seleccionado.')
         return None, None
 
-      # 3) Agregar al bucket de salida (e.g. 5T o H) tomando el max dentro de cada
-      #    bucket para preservar los picos reales.
       bucket_seconds = _freq_to_seconds(freq)
       if bucket_seconds >= 60:
         bucket_minutes = max(1, bucket_seconds // 60)
@@ -642,9 +657,7 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
         )
         active_per_minute = (
           active_per_minute
-          .with_columns(
-            pl.col('ts').dt.truncate(bucket_label).alias('_bucket')
-          )
+          .with_columns(pl.col('ts').dt.truncate(bucket_label).alias('_bucket'))
           .group_by('_bucket')
           .agg(pl.col('active_streams').max().alias('active_streams'))
           .rename({'_bucket': 'ts'})
@@ -653,7 +666,6 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
 
       ts = active_per_minute.get_column('ts').to_list()
       values = active_per_minute.get_column('active_streams').to_list()
-
       fig, ax = plt.subplots(figsize=figsize)
       fig.patch.set_alpha(0)
       ax.patch.set_alpha(0)
@@ -661,18 +673,16 @@ def _(DATE_REPORT_END, DATE_REPORT_INI, WINDOW_MINUTES, df, pl, plt):
       ax.fill_between(ts, values, 0, color=line_color, alpha=fill_alpha)
       ax.set_title(title)
       ax.set_xlabel('Tiempo')
-      ax.set_ylabel(f'Reproducciones')
+      ax.set_ylabel('Reproducciones')
       ax.grid(True, alpha=0.2, axis='y')
       fig.autofmt_xdate()
       fig.tight_layout()
       for spine in ax.spines.values():
         spine.set_visible(False)
-
       return fig, ax
 
-    df_dates_filter = df.filter(
-      pl.col('Date').str.to_datetime(strict=False).dt.date().is_between(DATE_REPORT_INI, DATE_REPORT_END)
-    )
+
+    df_dates_filter = df_report_filter
 
     general_streaming_plot = plot_concurrent_users_chart(
         events_df=df_dates_filter,
@@ -723,13 +733,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    WINDOW_MINUTES,
-    WIN_PLAY_EVENTOS_IDS,
-    df_dates_filter,
-    df_signals_day,
-    pl,
-):
+def _(SIGNALS, WINDOW_MINUTES, df_dates_filter, df_signals_day, pl):
     def _serie_to_utc(frame, col):
         dtype = frame.schema.get(col)
         if dtype is None or not isinstance(dtype, pl.Datetime):
@@ -760,8 +764,14 @@ def _(
     def concurrency_series(events_df, freq='5T', window_minutes=WINDOW_MINUTES):
         """Serie de concurrencia [ts, active_streams] con la misma metodología de
         `plot_concurrent_users_chart` (ventana rodante de `window_minutes`)."""
+        empty_series = pl.DataFrame(
+            schema={
+                'ts': pl.Datetime(time_zone='UTC'),
+                'active_streams': pl.Int64,
+            }
+        )
         if events_df is None or events_df.is_empty():
-            return pl.DataFrame({'ts': [], 'active_streams': []})
+            return empty_series
         events_df = _serie_to_utc(events_df, 'Date')
         start_utc = _serie_as_utc(events_df.select(pl.col('Date').min()).item())
         end_utc = _serie_as_utc(events_df.select(pl.col('Date').max()).item())
@@ -797,6 +807,9 @@ def _(
             .filter((pl.col('ts') >= start_utc) & (pl.col('ts') <= end_utc))
             .sort('ts')
         )
+        if active_per_minute.is_empty():
+            return empty_series
+
         bucket_seconds = _serie_freq_to_seconds(freq)
         if bucket_seconds >= 60:
             bucket_minutes = max(1, bucket_seconds // 60)
@@ -820,8 +833,14 @@ def _(
 
 
     def reescalar_concurrencia(signal, serie, pct):
-        """Reparte la concurrencia general (todos los eventos) entre las señales
-        multiplicándola por el porcentaje diario de registros de cada señal."""
+        """Reparte la concurrencia general entre señales según su porcentaje diario de registros."""
+        if serie.is_empty():
+            return pl.DataFrame(
+                schema={
+                    'ts': pl.Datetime(time_zone='UTC'),
+                    'Concurrencia': pl.Int64,
+                }
+            )
         pesos = (
             pct.filter(pl.col('Title') == signal)
             .select('_day', (pl.col('Porcentaje') / 100).alias('_peso'))
@@ -840,83 +859,43 @@ def _(
         )
 
 
-    df_WIN_FUTBOL = reescalar_concurrencia('WIN+FUTBOL', general_concurrency, df_signals_day)
-    df_WIN_SPORTS = reescalar_concurrencia('WIN SPORTS', general_concurrency, df_signals_day)
-    df_WIN_AUDIO = reescalar_concurrencia('WIN AUDIO', general_concurrency, df_signals_day)
-    df_DSPORTS = reescalar_concurrencia('DSPORTS', general_concurrency, df_signals_day)
-    df_DSPORTS_2 = reescalar_concurrencia('DSPORTS 2', general_concurrency, df_signals_day)
-    df_TYC = reescalar_concurrencia('TYC', general_concurrency, df_signals_day)
-
-    # Señales WIN PLAY EVENTOS: una serie reescalada por cada id de la lista.
-    df_WIN_PLAY_EVENTOS_1 = reescalar_concurrencia(
-        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[0]}', general_concurrency, df_signals_day
-    )
-    df_WIN_PLAY_EVENTOS_3 = reescalar_concurrencia(
-        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[1]}', general_concurrency, df_signals_day
-    )
-    df_WIN_PLAY_EVENTOS_4 = reescalar_concurrencia(
-        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[2]}', general_concurrency, df_signals_day
-    )
-    df_WIN_PLAY_EVENTOS_5 = reescalar_concurrencia(
-        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[3]}', general_concurrency, df_signals_day
-    )
-    df_WIN_PLAY_EVENTOS_6 = reescalar_concurrencia(
-        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[4]}', general_concurrency, df_signals_day
-    )
-    df_WIN_PLAY_EVENTOS_9 = reescalar_concurrencia(
-        f'WIN PLAY EVENTOS {WIN_PLAY_EVENTOS_IDS[5]}', general_concurrency, df_signals_day
-    )
-    (df_WIN_PLAY_EVENTOS_1.height, int(df_WIN_PLAY_EVENTOS_1['Concurrencia'].max() or 0))
-    return (
-        df_DSPORTS,
-        df_DSPORTS_2,
-        df_TYC,
-        df_WIN_AUDIO,
-        df_WIN_FUTBOL,
-        df_WIN_PLAY_EVENTOS_1,
-        df_WIN_PLAY_EVENTOS_3,
-        df_WIN_PLAY_EVENTOS_4,
-        df_WIN_PLAY_EVENTOS_5,
-        df_WIN_PLAY_EVENTOS_6,
-        df_WIN_PLAY_EVENTOS_9,
-        df_WIN_SPORTS,
-    )
+    # Se generan solo las series seleccionadas en SIGNALS; no hace falta crear
+    # una variable df_* nueva cada vez que cambia la selección.
+    concurrencia_por_senal = {
+        signal: reescalar_concurrencia(signal, general_concurrency, df_signals_day)
+        for signal in SIGNALS
+    }
+    return (concurrencia_por_senal,)
 
 
 @app.cell
-def _(
-    df_DSPORTS,
-    df_DSPORTS_2,
-    df_TYC,
-    df_WIN_AUDIO,
-    df_WIN_FUTBOL,
-    df_WIN_PLAY_EVENTOS_1,
-    df_WIN_PLAY_EVENTOS_3,
-    df_WIN_PLAY_EVENTOS_4,
-    df_WIN_PLAY_EVENTOS_5,
-    df_WIN_PLAY_EVENTOS_6,
-    df_WIN_PLAY_EVENTOS_9,
-    df_WIN_SPORTS,
-):
-    # Catálogo único de señales: (nombre, serie de concurrencia reescalada, color).
-    # Fuente de verdad para el Gráfico 1, el Gráfico 2 y la exportación a PNG.
-    # Las señales WIN PLAY EVENTOS reutilizan el mismo reescalado por porcentaje diario.
+def _(SIGNALS, concurrencia_por_senal):
+    # Paleta disponible para todas las señales del reporte.
+    COLORES_DISPONIBLES = {
+        'WIN+FUTBOL': '#ff5500',
+        'WIN SPORTS': '#d839ff',
+        'WIN AUDIO': '#6e8680',
+        'DSPORTS': '#0ba4e5',
+        'DSPORTS 2': '#1070a0',
+        'TYC': '#86c186',
+        'WIN PLAY EVENTOS 1': '#f9a825',
+        'WIN PLAY EVENTOS 2': '#ef6c00',
+        'WIN PLAY EVENTOS 3': '#33691e',
+        'WIN PLAY EVENTOS 4': '#ad1457',
+        'WIN PLAY EVENTOS 5': '#4527a0',
+        'WIN PLAY EVENTOS 6': '#6d4c41',
+        'WIN PLAY EVENTOS 7': '#00897b',
+        'WIN PLAY EVENTOS 8': '#5e35b1',
+        'WIN PLAY EVENTOS 9': '#37474f',
+    }
+
+    # Catálogo filtrado de señales: (nombre, serie de concurrencia reescalada, color).
+    # Gráficos, KPIs y exportaciones usan este catálogo y siguen la selección SIGNALS.
     SENALES_SERIES = [
-        ('WIN+FUTBOL', df_WIN_FUTBOL, '#ff5500'),
-        ('WIN SPORTS', df_WIN_SPORTS, '#d839ff'),
-        ('WIN AUDIO', df_WIN_AUDIO, '#6e8680'),
-        ('DSPORTS', df_DSPORTS, '#0ba4e5'),
-        ('DSPORTS 2', df_DSPORTS_2, '#1070a0'),
-        ('TYC', df_TYC, '#86c186'),
-        ('WIN PLAY EVENTOS 1', df_WIN_PLAY_EVENTOS_1, '#f9a825'),
-        ('WIN PLAY EVENTOS 3', df_WIN_PLAY_EVENTOS_3, '#33691e'),
-        ('WIN PLAY EVENTOS 4', df_WIN_PLAY_EVENTOS_4, '#ad1457'),
-        ('WIN PLAY EVENTOS 5', df_WIN_PLAY_EVENTOS_5, '#4527a0'),
-        ('WIN PLAY EVENTOS 6', df_WIN_PLAY_EVENTOS_6, '#6d4c41'),
-        ('WIN PLAY EVENTOS 9', df_WIN_PLAY_EVENTOS_9, '#37474f'),
+        (signal, concurrencia_por_senal[signal], COLORES_DISPONIBLES[signal])
+        for signal in SIGNALS
     ]
 
-    # Nombres y colores listos para iteraciones ligeras (sin los DataFrames).
     NOMBRES_SENALES = [nombre for nombre, _, _ in SENALES_SERIES]
     COLORES_SENALES = {nombre: color for nombre, _, color in SENALES_SERIES}
     len(SENALES_SERIES)
@@ -1118,23 +1097,10 @@ def _(dt, pl, plt):
         date_ini=None,
         date_end=None,
     ):
-        """Concurrencia apilada (escalado total) por señal.
-
-        Cada señal se acumula sobre las anteriores, de modo que la altura total en
-        cada instante equivale a la concurrencia total de todos los eventos,
-        coincidiendo con los picos del gráfico general (`general_streaming_plot`).
-
-        Donde una señal no existió, su aporte es 0, por lo que su color no aparece
-        hasta que vuelve a estar presente.
-
-        series: lista de tuplas (label, DataFrame con columnas ['ts', 'Concurrencia'], color).
-        date_ini / date_end: rango mostrado en el eje X. Si son None se toma el
-        mínimo/máximo de las marcas de tiempo de `series`.
-        """
+        """Concurrencia apilada por señal; las señales inexistentes aportan cero."""
         labels = [label for label, _, _ in series]
         colors = [color for _, _, color in series]
 
-        # Alinea todas las señales por su marca de tiempo.
         frame = None
         for label, senal_df, _ in series:
             bloque = senal_df.select(
@@ -1142,31 +1108,40 @@ def _(dt, pl, plt):
                 pl.col('Concurrencia').fill_null(0).cast(pl.Float64).alias(label),
             )
             frame = bloque if frame is None else frame.join(bloque, on='ts', how='inner')
-        frame = frame.sort('ts')
 
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.patch.set_alpha(0)
+        ax.patch.set_alpha(0)
+        ax.set_title(title, fontweight='bold')
+        ax.set_ylabel('Reproducciones')
+        ax.grid(True, alpha=0.2, axis='y')
+
+        if frame is None or frame.is_empty():
+            ax.text(
+                0.5, 0.5,
+                'Sin eventos en el rango de fechas seleccionado',
+                ha='center', va='center',
+                transform=ax.transAxes,
+            )
+            ax.set_xlabel('Tiempo')
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            fig.tight_layout()
+            return fig
+
+        frame = frame.sort('ts')
         ts = frame['ts'].to_list()
         values = [frame[label].to_list() for label in labels]
 
-        # Rango de fechas para el título del eje X ('3 oct', '4 sep', etc.)
         if date_ini is None:
             date_ini = frame['ts'].min()
         if date_end is None:
             date_end = frame['ts'].max()
         xlabel = f'Tiempo desde {_fmt_fecha_esp(date_ini)} hasta {_fmt_fecha_esp(date_end)}'
 
-        fig, ax = plt.subplots(figsize=figsize)
-        fig.patch.set_alpha(0)
-        ax.patch.set_alpha(0)
-
         ax.stackplot(ts, *values, labels=labels, colors=colors, alpha=fill_alpha, linewidth=0)
-
-        ax.set_title(title, fontweight='bold')
         ax.set_xlabel(xlabel, fontweight='bold')
-        ax.set_ylabel('Reproducciones')
-        ax.grid(True, alpha=0.2, axis='y')
 
-        # Con muchas señales la leyenda dentro del eje tapa las áreas: se saca a la
-        # derecha y se reserva espacio para ella.
         leyenda_fuera = len(labels) > 8
         if leyenda_fuera:
             ax.legend(
@@ -1204,10 +1179,10 @@ def _(mo):
 
     Dos botones para bajar un PNG (200 dpi, fondo blanco) de cada gráfico del reporte:
 
-    - **Comparación señales**: el Gráfico 1 tal cual, una fila por señal (ahora 12, incluidas las WIN PLAY EVENTOS) con la concurrencia reescalada junto a su tarjeta KPI de vistas totales.
-    - **Concurrencia apilada**: el Gráfico 2, concurrencia total segmentada por señal.
+    - **Comparación señales**: el Gráfico 1, con una fila por cada señal seleccionada en `SIGNALS` y su tarjeta KPI de vistas totales.
+    - **Concurrencia apilada**: el Gráfico 2, concurrencia total segmentada por las señales seleccionadas.
 
-    Los PNG se reconstruyen con los mismos datos del notebook, así que se actualizan al re-ejecutarlo.
+    Los PNG se reconstruyen con los mismos datos del notebook y se actualizan al cambiar `SIGNALS` y reejecutar el análisis.
     """)
     return
 
